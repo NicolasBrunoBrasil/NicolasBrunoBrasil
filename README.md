@@ -2,6 +2,10 @@
 
 App de **modelagem 3D fácil e fluida** feito sob medida para o **Samsung Galaxy Tab S10 FE** com **S Pen** — no estilo do "3D modeling: Design my model", com edição direta como no Fusion.
 
+| Editor | Esboço extrudado com furo |
+|---|---|
+| ![Editor](docs/editor.png) | ![Esboço](docs/esboco.png) |
+
 ## 📲 Como instalar no tablet
 
 1. Abra a página **[Releases](../../releases)** deste repositório no navegador do tablet.
