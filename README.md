@@ -34,6 +34,18 @@ App de **modelagem 3D fácil e fluida** feito sob medida para o **Samsung Galaxy
 - **Enviar para a impressora**: depois de exportar, compartilhe direto com Bambu Handy, Creality Print ou o app da sua impressora.
 - **Projetos** `.e3d` reabríveis + recuperação automática da última sessão · desfazer/refazer para tudo.
 
+### Ferramentas avançadas (estilo Fusion / CAD)
+
+- **Esculpir**: deforme a peça com pincel — inflar, afundar, suavizar e puxar; malhas grosseiras ganham resolução automaticamente.
+- **Borracha**: apaga a tinta com a caneta, como um pincel de apagar.
+- **Esboço por pontos**: coloque nós e arraste-os para ajustar o contorno antes de extrudar/recortar.
+- **Mesclar qualquer malha**: união booleana exata para peças leves e **combinação rápida** para malhas com milhões de faces.
+- **Codificação → 3D**: escreva código (JS) e gere objetos paramétricos (engrenagem, vaso, parafuso…) com a API `K.*`.
+- **Adicionar sobre a peça**: novos objetos apoiam no topo da seleção; o **texto pode acompanhar o contorno** ondulado da superfície.
+- **Régua mm/cm**: barra graduada sobre a cena + cotas da peça; aparece ao escalar e como acessório do painel.
+- **CAD**: medir distância, espelhar (X/Y/Z), matriz linear e circular, furo rápido e vista **ortográfica**.
+- **Painel rolável** com gaveta de Ferramentas e Acessórios sempre acessíveis.
+
 ## 🔧 Como o APK é construído
 
 Todo push dispara o workflow [`build.yml`](.github/workflows/build.yml): o `esbuild` empacota o editor (`web/src/*.js` + three.js), `scripts/build_apk.sh` monta o APK nativo (`aapt2 → javac → d8 → zipalign → apksigner`) e o resultado é publicado na Release **estudio3d-apk** e comitado em `apk/`.
