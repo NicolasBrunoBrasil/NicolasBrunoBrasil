@@ -1,4 +1,4 @@
-const CACHE = 'estudio3d-v1';
+const CACHE = 'korx3d-v2';
 const ASSETS = [
   './', 'index.html', 'app.css', 'dist/app.js',
   'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png',

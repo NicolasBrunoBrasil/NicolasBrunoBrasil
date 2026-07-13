@@ -1,14 +1,39 @@
 import * as THREE from 'three';
+import { textToGeometry, buildReliefGeometry, grayToB64 } from './shapegen.js';
 
 export const PALETTE = [
   '#4fc3f7', '#66bb6a', '#ffb74d', '#e57373', '#ba68c8', '#f06292',
   '#4db6ac', '#fff176', '#a1887f', '#90a4ae', '#7986cb', '#e0e0e0',
 ];
 
+// Acabamentos de material (aplicados sobre MeshPhysicalMaterial)
+export const FINISHES = {
+  padrao:    { label: 'Padrão',    roughness: 0.55, metalness: 0.05, clearcoat: 0,   iridescence: 0 },
+  fosco:     { label: 'Fosco',     roughness: 0.95, metalness: 0.0,  clearcoat: 0,   iridescence: 0 },
+  brilhante: { label: 'Brilhante', roughness: 0.12, metalness: 0.05, clearcoat: 0.7, iridescence: 0 },
+  metalico:  { label: 'Metálico',  roughness: 0.28, metalness: 1.0,  clearcoat: 0,   iridescence: 0 },
+  camaleao:  { label: 'Camaleão',  roughness: 0.3,  metalness: 0.75, clearcoat: 0.5, iridescence: 1 },
+};
+
+export function applyFinish(material, finish) {
+  const f = FINISHES[finish] || FINISHES.padrao;
+  material.roughness = f.roughness;
+  material.metalness = f.metalness;
+  if ('clearcoat' in material) {
+    material.clearcoat = f.clearcoat;
+    material.clearcoatRoughness = 0.15;
+    material.iridescence = f.iridescence;
+    material.iridescenceIOR = 1.9;
+  }
+  material.userData.finish = finish;
+  material.needsUpdate = true;
+}
+
 const PRIM_NAMES = {
   box: 'Cubo', sphere: 'Esfera', cylinder: 'Cilindro', cone: 'Cone',
   torus: 'Anel', plate: 'Placa', wedge: 'Rampa',
-  extrude: 'Esboço', import: 'Modelo',
+  extrude: 'Esboço', import: 'Modelo', text: 'Texto', image: 'Imagem',
+  relief: 'Relevo', csg: 'Peça',
 };
 
 export class Objects {
@@ -25,10 +50,45 @@ export class Objects {
     return c;
   }
 
-  makeMaterial(color) {
-    return new THREE.MeshStandardMaterial({
-      color: new THREE.Color(color), roughness: 0.55, metalness: 0.05,
+  makeMaterial(color, finish = 'padrao') {
+    const m = new THREE.MeshPhysicalMaterial({
+      color: new THREE.Color(color),
+      envMapIntensity: 0.85,
     });
+    applyFinish(m, finish);
+    return m;
+  }
+
+  setFinish(obj, finish) {
+    this.eachMaterial(obj, m => applyFinish(m, finish));
+  }
+
+  createText(text, { sizeMM = 20, depthMM = 5 } = {}) {
+    const { geometry, spec } = textToGeometry(text, { sizeMM, depthMM });
+    const mesh = new THREE.Mesh(geometry, this.makeMaterial(this.nextColor()));
+    mesh.castShadow = mesh.receiveShadow = true;
+    mesh.name = text.slice(0, 24) || this.makeName('text');
+    mesh.userData.kind = 'text';
+    mesh.userData.extrude = spec; // altura editável como qualquer extrusão
+    geometry.computeBoundingBox();
+    const bb = geometry.boundingBox;
+    const half = Math.max(bb.max.x - bb.min.x, bb.max.z - bb.min.z) / 2;
+    const spot = this.findFreeSpot(half);
+    mesh.position.set(spot.x, -bb.min.y, spot.z);
+    return mesh;
+  }
+
+  createRelief(gray, w, h, params) {
+    const geometry = buildReliefGeometry(gray, w, h, params);
+    const mesh = new THREE.Mesh(geometry, this.makeMaterial(this.nextColor()));
+    mesh.castShadow = mesh.receiveShadow = true;
+    mesh.name = this.makeName('relief');
+    mesh.userData.kind = 'relief';
+    mesh.userData.relief = { gray: grayToB64(gray), w, h, params: { ...params } };
+    const half = Math.max(params.widthMM, params.widthMM * h / w) / 2;
+    const spot = this.findFreeSpot(half);
+    mesh.position.set(spot.x, 0, spot.z);
+    return mesh;
   }
 
   makeName(kind) {

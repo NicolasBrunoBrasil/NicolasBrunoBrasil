@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 
 // Unidades: 1 unidade = 1 mm (padrão de impressão 3D)
 export class Viewport {
@@ -24,7 +25,7 @@ export class Viewport {
     this.controls.screenSpacePanning = true;
     this.controls.minDistance = 12;
     this.controls.maxDistance = 4000;
-    this.controls.maxPolarAngle = Math.PI * 0.55;
+    this.controls.maxPolarAngle = Math.PI; // órbita completa: dá para ver por baixo
     this.controls.target.set(0, 15, 0);
     this.controls.touches = { ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN };
     this.controls.addEventListener('start', () => { this._anim = null; });
@@ -41,6 +42,13 @@ export class Viewport {
   }
 
   _setupEnvironment() {
+    // ambiente de reflexos para materiais metálicos/camaleão
+    try {
+      const pmrem = new THREE.PMREMGenerator(this.renderer);
+      this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+      pmrem.dispose();
+    } catch (e) { console.warn('sem ambiente de reflexos', e); }
+
     const hemi = new THREE.HemisphereLight(0xdfeaf5, 0x39424d, 1.5);
     this.scene.add(hemi);
 
@@ -138,6 +146,7 @@ export class Viewport {
     const dirs = {
       iso: new THREE.Vector3(1, 0.85, 1.15).normalize(),
       top: new THREE.Vector3(0, 1, 0.0001).normalize(),
+      bottom: new THREE.Vector3(0, -1, 0.0001).normalize(),
       front: new THREE.Vector3(0, 0.12, 1).normalize(),
       right: new THREE.Vector3(1, 0.12, 0.0001).normalize(),
     };

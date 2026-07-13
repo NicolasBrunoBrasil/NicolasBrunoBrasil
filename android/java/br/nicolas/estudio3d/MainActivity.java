@@ -97,24 +97,70 @@ public class MainActivity extends Activity {
         moveTaskToBack(true);
     }
 
+    private Uri lastSavedUri;
+    private String lastSavedMime = "application/octet-stream";
+    private String lastSavedName = "";
+
     private class Bridge {
         @JavascriptInterface
         public void saveFile(String name, String mime, String base64) {
+            String type = (mime == null || mime.isEmpty()) ? "application/octet-stream" : mime;
             try {
                 byte[] bytes = Base64.decode(base64, Base64.DEFAULT);
                 ContentValues values = new ContentValues();
-                values.put(MediaStore.Downloads.DISPLAY_NAME, name);
-                values.put(MediaStore.Downloads.MIME_TYPE,
-                        mime == null || mime.isEmpty() ? "application/octet-stream" : mime);
+                values.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+                values.put(MediaStore.MediaColumns.MIME_TYPE, type);
+                values.put(MediaStore.MediaColumns.RELATIVE_PATH, "Download/Korx3D");
+                values.put(MediaStore.MediaColumns.IS_PENDING, 1);
                 Uri uri = getContentResolver()
                         .insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
                 if (uri == null) throw new IllegalStateException("sem acesso a Downloads");
                 try (OutputStream os = getContentResolver().openOutputStream(uri)) {
                     os.write(bytes);
+                    os.flush();
                 }
-                toast("Salvo em Downloads: " + name);
+                ContentValues done = new ContentValues();
+                done.put(MediaStore.MediaColumns.IS_PENDING, 0);
+                getContentResolver().update(uri, done, null, null);
+                lastSavedUri = uri;
+                lastSavedMime = type;
+                lastSavedName = name;
+                toast("Salvo em Download/Korx3D: " + name);
             } catch (Exception e) {
-                toast("Erro ao salvar: " + e.getMessage());
+                // plano B: pasta do próprio app (sempre gravável)
+                try {
+                    byte[] bytes = Base64.decode(base64, Base64.DEFAULT);
+                    java.io.File dir = getExternalFilesDir(android.os.Environment.DIRECTORY_DOWNLOADS);
+                    java.io.File f = new java.io.File(dir, name);
+                    try (java.io.FileOutputStream fos = new java.io.FileOutputStream(f)) {
+                        fos.write(bytes);
+                    }
+                    lastSavedUri = Uri.fromFile(f);
+                    lastSavedMime = type;
+                    lastSavedName = name;
+                    toast("Salvo em: " + f.getAbsolutePath());
+                } catch (Exception e2) {
+                    toast("Erro ao salvar: " + e.getMessage());
+                }
+            }
+        }
+
+        // Compartilha o último arquivo exportado — permite mandar direto para
+        // Bambu Handy, Creality Print/Cloud, e-mail, Drive etc.
+        @JavascriptInterface
+        public void shareLast() {
+            if (lastSavedUri == null) { toast("Exporte um arquivo primeiro"); return; }
+            try {
+                Intent send = new Intent(Intent.ACTION_SEND);
+                send.setType(lastSavedMime);
+                send.putExtra(Intent.EXTRA_STREAM, lastSavedUri);
+                send.putExtra(Intent.EXTRA_SUBJECT, lastSavedName);
+                send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                Intent chooser = Intent.createChooser(send, "Enviar " + lastSavedName + " para…");
+                chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(chooser);
+            } catch (Exception e) {
+                toast("Erro ao compartilhar: " + e.getMessage());
             }
         }
 

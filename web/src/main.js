@@ -3,6 +3,8 @@ import { History } from './history.js';
 import { Objects } from './objects.js';
 import { Sketch } from './sketch.js';
 import { Interact } from './interact.js';
+import { Paint } from './paint.js';
+import { Ops } from './ops.js';
 import * as IO from './io.js';
 import { UI } from './ui.js';
 
@@ -22,7 +24,9 @@ app.viewport = new Viewport(document.getElementById('viewport'));
 app.history = new History(app);
 app.objects = new Objects(app);
 app.sketch = new Sketch(app);
+app.paint = new Paint(app);
 app.interact = new Interact(app);
+app.ops = new Ops(app);
 IO.init(app);
 app.io = IO;
 app.ui = new UI(app);

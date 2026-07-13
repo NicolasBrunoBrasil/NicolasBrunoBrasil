@@ -8,6 +8,7 @@ import { OBJExporter } from 'three/addons/exporters/OBJExporter.js';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import { zipSync, strToU8 } from 'three/addons/libs/fflate.module.js';
 import { buildExtrudeGeometry } from './sketch.js';
+import { b64ToGray, buildReliefGeometry } from './shapegen.js';
 
 let app = null;
 const PRIM_KINDS = new Set(['box', 'sphere', 'cylinder', 'cone', 'torus', 'plate', 'wedge']);
@@ -31,6 +32,11 @@ export async function importFiles(fileList) {
     try {
       if (ext === 'e3d' || ext === 'json') {
         await openProjectFile(file);
+        continue;
+      }
+      if (['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'].includes(ext)) {
+        app.ui.hideLoading();
+        await app.ui.imageDialog(file);
         continue;
       }
       const obj = await parseModelFile(file, ext);
@@ -251,9 +257,12 @@ export function serializeProject() {
           color: '#' + mat.color.getHexString(),
           roughness: mat.roughness ?? 0.55,
           metalness: mat.metalness ?? 0.05,
+          finish: mat.userData.finish || 'padrao',
         };
       }
-      if (o.userData.extrude) rec.extrude = o.userData.extrude;
+      if (o.userData.geomDirty) rec.meshes = collectMeshData(o); // pintura/CSG/suavização
+      else if (o.userData.relief) rec.relief = o.userData.relief;
+      else if (o.userData.extrude) rec.extrude = o.userData.extrude;
       else if (!PRIM_KINDS.has(rec.kind)) rec.meshes = collectMeshData(o);
       return rec;
     }),
@@ -273,6 +282,9 @@ function collectMeshData(root) {
     if (g.attributes.normal) {
       const nrm = bakeNormals(g.attributes.normal, rel);
       rec.norm = f32ToB64(nrm);
+    }
+    if (g.attributes.color) {
+      rec.col = f32ToB64(new Float32Array(g.attributes.color.array));
     }
     if (g.index) rec.idx = u32ToB64(new Uint32Array(g.index.array));
     const mat = Array.isArray(m.material) ? m.material[0] : m.material;
@@ -314,27 +326,43 @@ export function loadProjectJSON(data) {
 
   for (const rec of data.objects) {
     let obj = null;
-    const mat = objs.makeMaterial(rec.material ? rec.material.color : '#4fc3f7');
-    if (rec.material) {
-      mat.roughness = rec.material.roughness;
-      mat.metalness = rec.material.metalness;
-    }
-    if (rec.extrude) {
-      const geo = buildExtrudeGeometry(rec.extrude);
-      obj = new THREE.Mesh(geo.geometry, mat);
-      obj.userData.extrude = rec.extrude;
-    } else if (PRIM_KINDS.has(rec.kind)) {
-      obj = new THREE.Mesh(objs.geometryFor(rec.kind), mat);
-    } else if (rec.meshes) {
+    const finish = rec.material ? rec.material.finish || 'padrao' : 'padrao';
+    const mat = objs.makeMaterial(rec.material ? rec.material.color : '#4fc3f7', finish);
+    if (rec.meshes) {
       obj = new THREE.Group();
+      let dirty = false;
       for (const md of rec.meshes) {
         const g = new THREE.BufferGeometry();
         g.setAttribute('position', new THREE.BufferAttribute(b64ToF32(md.pos), 3));
         if (md.norm) g.setAttribute('normal', new THREE.BufferAttribute(b64ToF32(md.norm), 3));
         else g.computeVertexNormals();
         if (md.idx) g.setIndex(new THREE.BufferAttribute(b64ToU32(md.idx), 1));
-        obj.add(new THREE.Mesh(g, objs.makeMaterial(md.color || '#90a4ae')));
+        const mmat = objs.makeMaterial(md.color || '#90a4ae', finish);
+        if (md.col) {
+          g.setAttribute('color', new THREE.BufferAttribute(b64ToF32(md.col), 3));
+          mmat.vertexColors = true;
+          mmat.color.set(0xffffff);
+          dirty = true;
+        }
+        obj.add(new THREE.Mesh(g, mmat));
       }
+      if (dirty || rec.kind === 'csg') obj.userData.geomDirty = true;
+      // grupo com uma única malha vira a própria malha (mais leve de manipular)
+      if (obj.children.length === 1) {
+        const only = obj.children[0];
+        only.userData.geomDirty = obj.userData.geomDirty;
+        obj = only;
+      }
+    } else if (rec.relief) {
+      const gray = b64ToGray(rec.relief.gray);
+      obj = new THREE.Mesh(buildReliefGeometry(gray, rec.relief.w, rec.relief.h, rec.relief.params), mat);
+      obj.userData.relief = rec.relief;
+    } else if (rec.extrude) {
+      const geo = buildExtrudeGeometry(rec.extrude);
+      obj = new THREE.Mesh(geo.geometry, mat);
+      obj.userData.extrude = rec.extrude;
+    } else if (PRIM_KINDS.has(rec.kind)) {
+      obj = new THREE.Mesh(objs.geometryFor(rec.kind), mat);
     }
     if (!obj) continue;
     obj.name = rec.name || 'Objeto';
@@ -385,19 +413,28 @@ export function tryOfferRestore() {
 
 export async function saveBlob(name, blob) {
   if (window.EstudioBridge && window.EstudioBridge.saveFile) {
-    const b64 = await blobToB64(blob);
-    window.EstudioBridge.saveFile(name, blob.type || 'application/octet-stream', b64);
-    app.ui.toast(`Salvo em Downloads: ${name}`);
-  } else {
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = name;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-    app.ui.toast(`Arquivo gerado: ${name}`);
+    try {
+      const b64 = await blobToB64(blob);
+      window.EstudioBridge.saveFile(name, blob.type || 'application/octet-stream', b64);
+      // o Android confirma com um toast próprio; aqui oferecemos o envio
+      // direto para o app da impressora (Bambu Handy, Creality, etc.)
+      app.ui.toast(`Salvo em Downloads: ${name}`, 'Enviar para impressora', () => {
+        try { window.EstudioBridge.shareLast(); }
+        catch (e) { app.ui.toast('Não consegui abrir o compartilhamento'); }
+      }, 8000);
+      return;
+    } catch (err) {
+      console.error('bridge falhou, tentando download', err);
+    }
   }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  app.ui.toast(`Arquivo gerado: ${name}`);
 }
 
 function blobToB64(blob) {

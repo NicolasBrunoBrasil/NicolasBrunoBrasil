@@ -3,9 +3,11 @@ import { TransformControls } from 'three/addons/controls/TransformControls.js';
 
 // Interação com caneta/toque:
 //  - dedo: 1 = orbitar, 2 = zoom/pan; toque curto = selecionar
-//  - caneta (ou mouse): arrasta objeto diretamente no plano, toque curto = selecionar,
-//    arrastar no vazio = orbitar; botão da caneta = pan
+//  - caneta (ou mouse): arrasta objeto diretamente, toque curto = selecionar,
+//    arrastar no vazio = orbitar; no modo pintura, a caneta pinta
 //  - gizmo (mover/girar/escalar) sempre tem prioridade
+// IMPORTANTE: os manipuladores só reagem a eventos no próprio canvas — botões
+// e painéis sobrepostos ao viewport não são interceptados.
 export class Interact {
   constructor(app) {
     this.app = app;
@@ -14,6 +16,7 @@ export class Interact {
     this.selected = null;
     this.mode = 'translate';
     this.snapping = true;
+    this.pickCallback = null; // modo "toque na outra peça" (mesclar)
 
     this.tc = new TransformControls(vp.camera, vp.renderer.domElement);
     this.tc.setSize(1.15);
@@ -34,7 +37,6 @@ export class Interact {
     });
     this.tc.addEventListener('objectChange', () => this._updateHelpers());
 
-    // contornos de seleção e de hover
     this.selBox = new THREE.BoxHelper(new THREE.Object3D(), 0x4fc3f7);
     this.selBox.visible = false;
     this.selBox.material.transparent = true;
@@ -50,6 +52,7 @@ export class Interact {
     this._lastHoverCheck = 0;
 
     this._planeDrag = null;
+    this._painting = false;
     this._taps = new Map();
 
     const el = vp.container;
@@ -64,11 +67,13 @@ export class Interact {
     });
   }
 
+  _isCanvas(e) { return e.target === this.app.viewport.renderer.domElement; }
+
   // ---------- seleção ----------
   select(obj) {
     if (obj === this.selected) { this.app.emit('selection-changed'); return; }
     this.selected = obj;
-    if (obj && this.mode !== 'none') {
+    if (obj && this.mode !== 'none' && !this.app.paint.active) {
       this.tc.attach(obj);
       this.tc.visible = true;
       this.tc.enabled = true;
@@ -82,9 +87,14 @@ export class Interact {
     this.app.emit('selection-changed');
   }
 
+  refreshSelection() { this._updateHelpers(); }
+
+  startPick(callback) { this.pickCallback = callback; }
+  cancelPick() { this.pickCallback = null; }
+
   setMode(mode) {
     this.mode = mode;
-    if (mode === 'none') {
+    if (mode === 'none' || this.app.paint.active) {
       this.tc.detach(); this.tc.visible = false; this.tc.enabled = false;
     } else {
       this.tc.setMode(mode);
@@ -162,12 +172,13 @@ export class Interact {
     const hits = vp.raycastFrom(e, visible, true);
     for (const h of hits) {
       const root = this.app.objects.findRoot(h.object);
-      if (root && root.visible) return { root, point: h.point };
+      if (root && root.visible) return { root, point: h.point, object: h.object, face: h.face };
     }
     return null;
   }
 
   _onDown(e) {
+    if (!this._isCanvas(e)) return; // botões/painéis sobre o viewport passam direto
     if (this.app.ui && this.app.ui.modalOpen) return;
     this._taps.set(e.pointerId, { x: e.clientX, y: e.clientY, t: performance.now(), moved: false });
 
@@ -177,19 +188,35 @@ export class Interact {
         this.app.viewport.container.setPointerCapture(e.pointerId);
         this.app.sketch.pointerDown(e);
       }
-      return; // dedos continuam orbitando/pan
+      return;
+    }
+
+    if (this.app.paint.active) {
+      if (this._isPrecise(e) && e.button === 0) {
+        const hit = this._hitUserObject(e);
+        if (hit) {
+          e.stopPropagation();
+          this.app.viewport.container.setPointerCapture(e.pointerId);
+          this._painting = true;
+          this.app.paint.strokeBegin();
+          this.app.paint.paintAt(hit);
+          this.app.paint.showCursorAt(hit);
+        }
+      }
+      return; // dedos orbitam normalmente no modo pintura
     }
 
     if (!this._isPrecise(e) || e.button !== 0) return;
-    if (this._hitGizmo(e)) return; // TransformControls assume o arrasto
+    if (this._hitGizmo(e)) return;
 
     const hit = this._hitUserObject(e);
-    if (!hit) return; // arrastar no vazio = orbitar
+    if (!hit) return;
+
+    if (this.pickCallback) { e.stopPropagation(); return; } // resolve no toque curto
 
     e.stopPropagation();
     if (this.selected !== hit.root) this.select(hit.root);
 
-    // arrasto direto no plano horizontal que passa pelo ponto tocado
     const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -hit.point.y);
     this._planeDrag = {
       pointerId: e.pointerId,
@@ -211,6 +238,24 @@ export class Interact {
       return;
     }
 
+    if (this._painting) {
+      e.stopPropagation();
+      const hit = this._hitUserObject(e);
+      if (hit) { this.app.paint.paintAt(hit); this.app.paint.showCursorAt(hit); }
+      return;
+    }
+
+    if (this.app.paint.active) {
+      if (this._isCanvas(e) && this._isPrecise(e) && e.buttons === 0) {
+        const now = performance.now();
+        if (now - this._lastHoverCheck > 40) {
+          this._lastHoverCheck = now;
+          this.app.paint.showCursorAt(this._hitUserObject(e));
+        }
+      }
+      return;
+    }
+
     if (this._planeDrag && e.pointerId === this._planeDrag.pointerId) {
       e.stopPropagation();
       const d = this._planeDrag;
@@ -226,8 +271,7 @@ export class Interact {
       return;
     }
 
-    // realce ao passar a caneta (hover da S Pen) — limitado por desempenho
-    if (this._isPrecise(e) && e.buttons === 0 && !this.tc.dragging) {
+    if (this._isCanvas(e) && this._isPrecise(e) && e.buttons === 0 && !this.tc.dragging) {
       const now = performance.now();
       if (now - this._lastHoverCheck > 70) {
         this._lastHoverCheck = now;
@@ -245,7 +289,13 @@ export class Interact {
 
     if (this.app.sketch.active) {
       if (this.app.sketch.stroking) { e.stopPropagation(); this.app.sketch.pointerUp(e); }
-      else if (tap && !tap.moved && this._isPrecise(e)) this.app.sketch.tap(e);
+      return;
+    }
+
+    if (this._painting) {
+      e.stopPropagation();
+      this._painting = false;
+      this.app.paint.strokeEnd();
       return;
     }
 
@@ -257,16 +307,25 @@ export class Interact {
       return;
     }
 
-    // toque curto: selecionar / limpar seleção
+    // toque curto: escolher peça (mesclar) / selecionar / limpar seleção
     if (tap && !tap.moved && performance.now() - tap.t < 500) {
+      if (!this._isCanvas(e)) return;
       if (this._hitGizmo(e)) return;
       const hit = this._hitUserObject(e);
+      if (this.pickCallback) {
+        const cb = this.pickCallback;
+        this.pickCallback = null;
+        cb(hit ? hit.root : null);
+        return;
+      }
+      if (this.app.paint.active) return; // no modo pintura o toque não seleciona
       this.select(hit ? hit.root : null);
     }
   }
 
   _onCancel(e) {
     this._taps.delete(e.pointerId);
+    if (this._painting) { this._painting = false; this.app.paint.strokeEnd(); }
     if (this._planeDrag && e.pointerId === this._planeDrag.pointerId) {
       this._restore(this._planeDrag.obj, this._planeDrag.before);
       this._planeDrag = null;
@@ -293,5 +352,14 @@ export class Interact {
   duplicateSelected() {
     if (!this.selected) return;
     this.app.objects.duplicate(this.selected);
+  }
+
+  scaleSelected(factor) {
+    const sel = this.selected;
+    if (!sel) return;
+    const before = this._snapshot(sel);
+    sel.scale.multiplyScalar(factor);
+    this._pushTransform(sel, before);
+    this.app.emit('selection-changed');
   }
 }

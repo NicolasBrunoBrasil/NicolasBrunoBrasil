@@ -1,14 +1,20 @@
 import * as THREE from 'three';
+import { recognizeShape } from './recognize.js';
 
-// Modo esboço: desenha com a caneta no plano do chão (vista de topo) e extruda.
-// Traços fechados dentro de outros viram furos (nível par/ímpar).
+// Modo esboço: desenha com a caneta no plano do chão (vista de topo).
+// - modo 'add': extruda os traços para criar um sólido (furos automáticos)
+// - modo 'cut': usa os traços como cortador e subtrai da peça alvo
+// Correção mágica (✨): reconhece círculo/estrela/retângulo/… e endireita.
 export class Sketch {
   constructor(app) {
     this.app = app;
     this.active = false;
     this.stroking = false;
     this.tool = 'free';
-    this.strokes = []; // cada traço: Vector2[] (coords do chão: x,z) fechado
+    this.mode = 'add';
+    this.cutTarget = null;
+    this.magic = true;
+    this.strokes = []; // cada traço: pontos {x,y} nas coords do chão (x,z)
     this.defaultDepth = 10;
 
     this._plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
@@ -23,26 +29,41 @@ export class Sketch {
     tint.rotation.x = -Math.PI / 2;
     tint.position.y = 0.02;
     this._group.add(tint);
+    this._tint = tint;
 
     this._lineMat = new THREE.LineBasicMaterial({ color: 0x4fc3f7 });
+    this._cutMat = new THREE.LineBasicMaterial({ color: 0xff7043 });
     this._doneMat = new THREE.LineBasicMaterial({ color: 0x8de0ff, transparent: true, opacity: 0.85 });
+    this._doneCutMat = new THREE.LineBasicMaterial({ color: 0xffab91, transparent: true, opacity: 0.9 });
     this._lines = [];
     this._live = null;
     this._livePts = [];
   }
 
-  enter() {
+  enter(opts = {}) {
     if (this.active) return;
     this.active = true;
+    this.mode = opts.mode || 'add';
+    this.cutTarget = opts.target || null;
     const vp = this.app.viewport;
     this._savedCam = { pos: vp.camera.position.clone(), tgt: vp.controls.target.clone() };
-    const d = Math.max(vp.camera.position.distanceTo(vp.controls.target), 180);
-    vp.animateTo(new THREE.Vector3(0, d, 0.0001), new THREE.Vector3(0, 0, 0));
+
+    let cx = 0, cz = 0, d = Math.max(vp.camera.position.distanceTo(vp.controls.target), 180);
+    if (this.cutTarget) {
+      const box = this.app.objects.bounds(this.cutTarget);
+      const c = box.getCenter(new THREE.Vector3());
+      cx = c.x; cz = c.z;
+      d = Math.max(box.getSize(new THREE.Vector3()).length() * 1.8, 120);
+      this._tint.material.color.set(0xff7043);
+    } else {
+      this._tint.material.color.set(0x4fc3f7);
+    }
+    vp.animateTo(new THREE.Vector3(cx, d, cz + 0.0001), new THREE.Vector3(cx, 0, cz));
     vp.controls.enableRotate = false;
     this._savedTouchOne = vp.controls.touches.ONE;
     vp.controls.touches.ONE = THREE.TOUCH.PAN;
     this._group.visible = true;
-    this.app.interact.select(null);
+    if (this.mode === 'add') this.app.interact.select(null);
     this.app.emit('sketch-changed');
   }
 
@@ -50,6 +71,7 @@ export class Sketch {
     if (!this.active) return;
     this.active = false;
     this.stroking = false;
+    this.cutTarget = null;
     this._clearStrokes();
     const vp = this.app.viewport;
     vp.controls.enableRotate = true;
@@ -59,12 +81,9 @@ export class Sketch {
     this.app.emit('sketch-changed');
   }
 
-  setTool(t) {
-    this.tool = t;
-    this.app.emit('sketch-changed');
-  }
-
-  tap() { /* reservado para ferramentas futuras */ }
+  setTool(t) { this.tool = t; this.app.emit('sketch-changed'); }
+  setMagic(on) { this.magic = on; this.app.emit('sketch-changed'); }
+  tap() { /* reservado */ }
 
   // ---------- entrada da caneta ----------
   pointerDown(e) {
@@ -115,9 +134,15 @@ export class Sketch {
     if (this.tool === 'free') {
       pts = smooth(pts);
       pts = simplify(pts, 0.7);
+      if (pts.length >= 6 && this.magic) {
+        const rec = recognizeShape(pts);
+        if (rec) {
+          pts = rec.pts.map(p => new THREE.Vector2(p.x, p.y));
+          this.app.ui.toast(`✨ Corrigido: ${rec.label}`);
+        }
+      }
     }
-    if (pts.length < 3) { this.app.emit('sketch-changed'); return; }
-    if (Math.abs(area(pts)) < 4) { this.app.emit('sketch-changed'); return; }
+    if (pts.length < 3 || Math.abs(area(pts)) < 4) { this.app.emit('sketch-changed'); return; }
 
     this.strokes.push(pts);
     this._addStrokeLine(pts);
@@ -138,48 +163,19 @@ export class Sketch {
     this.app.emit('sketch-changed');
   }
 
-  // ---------- construção do sólido ----------
+  // ---------- conclusão ----------
   finish() {
     if (!this.strokes.length) { this.exit(true); return; }
+    const polys = this.strokes.map(pts => pts.map(p => ({ x: p.x, y: -p.y }))); // chão -> forma
+    const spec = buildSpecFromPolys(polys, this.defaultDepth);
+    if (!spec) { this.exit(true); return; }
 
-    // classifica por nível de contenção (par = contorno, ímpar = furo)
-    const polys = this.strokes
-      .map(pts => pts.map(p => new THREE.Vector2(p.x, -p.y))) // chão (x,z) -> forma (x,y)
-      .sort((a, b) => Math.abs(area(b)) - Math.abs(area(a)));
-
-    const entries = polys.map(pts => ({ pts, depth: 0, parent: null }));
-    for (let i = 0; i < entries.length; i++) {
-      for (let j = 0; j < i; j++) {
-        if (pointInPoly(entries[i].pts[0], entries[j].pts)) {
-          entries[i].depth++;
-          if (entries[i].parent === null || entries[j].depth >= entries[entries[i].parent].depth) {
-            entries[i].parent = j;
-          }
-        }
-      }
+    if (this.mode === 'cut') {
+      const target = this.cutTarget;
+      this.exit(false);
+      if (target) this.app.ops.cutWithSpec(target, spec);
+      return null;
     }
-
-    const outers = [];
-    entries.forEach((e, i) => {
-      if (e.depth % 2 === 0) {
-        e.outerIndex = outers.length;
-        outers.push({ pts: ensureWinding(e.pts, true), holes: [] });
-      }
-    });
-    entries.forEach((e) => {
-      if (e.depth % 2 === 1 && e.parent !== null && entries[e.parent].outerIndex !== undefined) {
-        outers[entries[e.parent].outerIndex].holes.push(ensureWinding(e.pts, false));
-      }
-    });
-    if (!outers.length) { this.exit(true); return; }
-
-    const spec = {
-      outers: outers.map(o => ({
-        pts: o.pts.map(p => [round3(p.x), round3(p.y)]),
-        holes: o.holes.map(h => h.map(p => [round3(p.x), round3(p.y)])),
-      })),
-      depth: this.defaultDepth,
-    };
 
     const geo = buildExtrudeGeometry(spec);
     const objs = this.app.objects;
@@ -200,7 +196,7 @@ export class Sketch {
   _ensureLive() {
     this._removeLive();
     this._liveGeo = new THREE.BufferGeometry();
-    this._live = new THREE.Line(this._liveGeo, this._lineMat);
+    this._live = new THREE.Line(this._liveGeo, this.mode === 'cut' ? this._cutMat : this._lineMat);
     this._live.position.y = 0.1;
     this._group.add(this._live);
     this._updateLive();
@@ -224,7 +220,9 @@ export class Sketch {
   _addStrokeLine(pts) {
     const v = pts.map(p => new THREE.Vector3(p.x, 0, p.y));
     v.push(v[0].clone());
-    const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(v), this._doneMat);
+    const line = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(v),
+      this.mode === 'cut' ? this._doneCutMat : this._doneMat);
     line.position.y = 0.1;
     this._group.add(line);
     this._lines.push(line);
@@ -238,8 +236,53 @@ export class Sketch {
   }
 }
 
-// Reconstrói a geometria extrudada a partir da especificação salva (usado
-// também ao mudar a altura e ao reabrir projetos).
+// ---------- construção de sólidos a partir de polígonos 2D ----------
+
+// polys: lista de laços [{x,y},…] em coords de forma (y para cima).
+// Classifica por paridade de contenção: nível par = contorno, ímpar = furo.
+export function buildSpecFromPolys(polys, depth) {
+  const sorted = polys
+    .map(pts => pts.map(p => new THREE.Vector2(p.x, p.y)))
+    .filter(pts => pts.length >= 3 && Math.abs(area(pts)) > 1)
+    .sort((a, b) => Math.abs(area(b)) - Math.abs(area(a)));
+  if (!sorted.length) return null;
+
+  const entries = sorted.map(pts => ({ pts, depth: 0, parent: null }));
+  for (let i = 0; i < entries.length; i++) {
+    for (let j = 0; j < i; j++) {
+      if (pointInPoly(entries[i].pts[0], entries[j].pts)) {
+        entries[i].depth++;
+        if (entries[i].parent === null || entries[j].depth >= entries[entries[i].parent].depth) {
+          entries[i].parent = j;
+        }
+      }
+    }
+  }
+
+  const outers = [];
+  entries.forEach((e) => {
+    if (e.depth % 2 === 0) {
+      e.outerIndex = outers.length;
+      outers.push({ pts: ensureWinding(e.pts, true), holes: [] });
+    }
+  });
+  entries.forEach((e) => {
+    if (e.depth % 2 === 1 && e.parent !== null && entries[e.parent].outerIndex !== undefined) {
+      outers[entries[e.parent].outerIndex].holes.push(ensureWinding(e.pts, false));
+    }
+  });
+  if (!outers.length) return null;
+
+  return {
+    outers: outers.map(o => ({
+      pts: o.pts.map(p => [round3(p.x), round3(p.y)]),
+      holes: o.holes.map(h => h.map(p => [round3(p.x), round3(p.y)])),
+    })),
+    depth,
+  };
+}
+
+// Reconstrói a geometria extrudada a partir da especificação salva.
 export function buildExtrudeGeometry(spec) {
   const shapes = spec.outers.map(o => {
     const shape = new THREE.Shape(o.pts.map(p => new THREE.Vector2(p[0], p[1])));
@@ -264,7 +307,6 @@ export function rebuildExtrudeDepth(mesh, depth) {
   if (!spec) return;
   spec.depth = depth;
   const old = mesh.geometry;
-  // o contorno não muda, então o centro XZ é o mesmo e o pivô não pula
   mesh.geometry = buildExtrudeGeometry({ outers: spec.outers, depth }).geometry;
   old.dispose();
 }
@@ -307,7 +349,6 @@ function smooth(pts) {
   return out;
 }
 
-// Ramer–Douglas–Peucker
 function simplify(pts, eps) {
   if (pts.length < 3) return pts;
   const keep = new Array(pts.length).fill(false);
