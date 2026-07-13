@@ -1,0 +1,340 @@
+import * as THREE from 'three';
+
+// Modo esboço: desenha com a caneta no plano do chão (vista de topo) e extruda.
+// Traços fechados dentro de outros viram furos (nível par/ímpar).
+export class Sketch {
+  constructor(app) {
+    this.app = app;
+    this.active = false;
+    this.stroking = false;
+    this.tool = 'free';
+    this.strokes = []; // cada traço: Vector2[] (coords do chão: x,z) fechado
+    this.defaultDepth = 10;
+
+    this._plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+    this._group = new THREE.Group();
+    this._group.visible = false;
+    app.viewport.scene.add(this._group);
+
+    const tint = new THREE.Mesh(
+      new THREE.PlaneGeometry(300, 300),
+      new THREE.MeshBasicMaterial({ color: 0x4fc3f7, transparent: true, opacity: 0.05, depthWrite: false })
+    );
+    tint.rotation.x = -Math.PI / 2;
+    tint.position.y = 0.02;
+    this._group.add(tint);
+
+    this._lineMat = new THREE.LineBasicMaterial({ color: 0x4fc3f7 });
+    this._doneMat = new THREE.LineBasicMaterial({ color: 0x8de0ff, transparent: true, opacity: 0.85 });
+    this._lines = [];
+    this._live = null;
+    this._livePts = [];
+  }
+
+  enter() {
+    if (this.active) return;
+    this.active = true;
+    const vp = this.app.viewport;
+    this._savedCam = { pos: vp.camera.position.clone(), tgt: vp.controls.target.clone() };
+    const d = Math.max(vp.camera.position.distanceTo(vp.controls.target), 180);
+    vp.animateTo(new THREE.Vector3(0, d, 0.0001), new THREE.Vector3(0, 0, 0));
+    vp.controls.enableRotate = false;
+    this._savedTouchOne = vp.controls.touches.ONE;
+    vp.controls.touches.ONE = THREE.TOUCH.PAN;
+    this._group.visible = true;
+    this.app.interact.select(null);
+    this.app.emit('sketch-changed');
+  }
+
+  exit(cancelled = false) {
+    if (!this.active) return;
+    this.active = false;
+    this.stroking = false;
+    this._clearStrokes();
+    const vp = this.app.viewport;
+    vp.controls.enableRotate = true;
+    vp.controls.touches.ONE = this._savedTouchOne ?? THREE.TOUCH.ROTATE;
+    this._group.visible = false;
+    if (cancelled && this._savedCam) vp.animateTo(this._savedCam.pos, this._savedCam.tgt);
+    this.app.emit('sketch-changed');
+  }
+
+  setTool(t) {
+    this.tool = t;
+    this.app.emit('sketch-changed');
+  }
+
+  tap() { /* reservado para ferramentas futuras */ }
+
+  // ---------- entrada da caneta ----------
+  pointerDown(e) {
+    const p = this.app.viewport.planeHit(e, this._plane);
+    if (!p) return;
+    this.stroking = true;
+    this._start = new THREE.Vector2(p.x, p.z);
+    this._livePts = [this._start.clone()];
+    this._ensureLive();
+  }
+
+  pointerMove(e) {
+    if (!this.stroking) return;
+    const p = this.app.viewport.planeHit(e, this._plane);
+    if (!p) return;
+    const cur = new THREE.Vector2(p.x, p.z);
+    if (this.tool === 'free') {
+      const last = this._livePts[this._livePts.length - 1];
+      if (last.distanceTo(cur) >= 0.4) this._livePts.push(cur);
+    } else if (this.tool === 'rect') {
+      const a = this._start, b = cur;
+      if (this.app.interact.snapping) { b.x = Math.round(b.x); b.y = Math.round(b.y); }
+      this._livePts = [
+        new THREE.Vector2(a.x, a.y), new THREE.Vector2(b.x, a.y),
+        new THREE.Vector2(b.x, b.y), new THREE.Vector2(a.x, b.y),
+      ];
+    } else if (this.tool === 'circle') {
+      let r = this._start.distanceTo(cur);
+      if (this.app.interact.snapping) r = Math.max(1, Math.round(r));
+      const n = 64;
+      this._livePts = [];
+      for (let i = 0; i < n; i++) {
+        const t = (i / n) * Math.PI * 2;
+        this._livePts.push(new THREE.Vector2(
+          this._start.x + Math.cos(t) * r, this._start.y + Math.sin(t) * r));
+      }
+    }
+    this._updateLive();
+  }
+
+  pointerUp() {
+    if (!this.stroking) return;
+    this.stroking = false;
+    let pts = this._livePts;
+    this._livePts = [];
+    this._removeLive();
+
+    if (this.tool === 'free') {
+      pts = smooth(pts);
+      pts = simplify(pts, 0.7);
+    }
+    if (pts.length < 3) { this.app.emit('sketch-changed'); return; }
+    if (Math.abs(area(pts)) < 4) { this.app.emit('sketch-changed'); return; }
+
+    this.strokes.push(pts);
+    this._addStrokeLine(pts);
+    this.app.emit('sketch-changed');
+  }
+
+  pointerCancel() {
+    this.stroking = false;
+    this._livePts = [];
+    this._removeLive();
+  }
+
+  undoStroke() {
+    if (!this.strokes.length) return;
+    this.strokes.pop();
+    const line = this._lines.pop();
+    if (line) { this._group.remove(line); line.geometry.dispose(); }
+    this.app.emit('sketch-changed');
+  }
+
+  // ---------- construção do sólido ----------
+  finish() {
+    if (!this.strokes.length) { this.exit(true); return; }
+
+    // classifica por nível de contenção (par = contorno, ímpar = furo)
+    const polys = this.strokes
+      .map(pts => pts.map(p => new THREE.Vector2(p.x, -p.y))) // chão (x,z) -> forma (x,y)
+      .sort((a, b) => Math.abs(area(b)) - Math.abs(area(a)));
+
+    const entries = polys.map(pts => ({ pts, depth: 0, parent: null }));
+    for (let i = 0; i < entries.length; i++) {
+      for (let j = 0; j < i; j++) {
+        if (pointInPoly(entries[i].pts[0], entries[j].pts)) {
+          entries[i].depth++;
+          if (entries[i].parent === null || entries[j].depth >= entries[entries[i].parent].depth) {
+            entries[i].parent = j;
+          }
+        }
+      }
+    }
+
+    const outers = [];
+    entries.forEach((e, i) => {
+      if (e.depth % 2 === 0) {
+        e.outerIndex = outers.length;
+        outers.push({ pts: ensureWinding(e.pts, true), holes: [] });
+      }
+    });
+    entries.forEach((e) => {
+      if (e.depth % 2 === 1 && e.parent !== null && entries[e.parent].outerIndex !== undefined) {
+        outers[entries[e.parent].outerIndex].holes.push(ensureWinding(e.pts, false));
+      }
+    });
+    if (!outers.length) { this.exit(true); return; }
+
+    const spec = {
+      outers: outers.map(o => ({
+        pts: o.pts.map(p => [round3(p.x), round3(p.y)]),
+        holes: o.holes.map(h => h.map(p => [round3(p.x), round3(p.y)])),
+      })),
+      depth: this.defaultDepth,
+    };
+
+    const geo = buildExtrudeGeometry(spec);
+    const objs = this.app.objects;
+    const mesh = new THREE.Mesh(geo.geometry, objs.makeMaterial(objs.nextColor()));
+    mesh.castShadow = mesh.receiveShadow = true;
+    mesh.name = objs.makeName('extrude');
+    mesh.userData.kind = 'extrude';
+    mesh.userData.extrude = spec;
+    mesh.position.copy(geo.center);
+
+    this.exit(false);
+    objs.add(mesh);
+    this.app.ui.toast('Ajuste a “Altura” no painel de propriedades');
+    return mesh;
+  }
+
+  // ---------- linhas de pré-visualização ----------
+  _ensureLive() {
+    this._removeLive();
+    this._liveGeo = new THREE.BufferGeometry();
+    this._live = new THREE.Line(this._liveGeo, this._lineMat);
+    this._live.position.y = 0.1;
+    this._group.add(this._live);
+    this._updateLive();
+  }
+
+  _updateLive() {
+    if (!this._live) return;
+    const pts = this._livePts.map(p => new THREE.Vector3(p.x, 0, p.y));
+    if (pts.length > 1 && this.tool !== 'free') pts.push(pts[0].clone());
+    this._liveGeo.setFromPoints(pts);
+  }
+
+  _removeLive() {
+    if (this._live) {
+      this._group.remove(this._live);
+      this._liveGeo.dispose();
+      this._live = null;
+    }
+  }
+
+  _addStrokeLine(pts) {
+    const v = pts.map(p => new THREE.Vector3(p.x, 0, p.y));
+    v.push(v[0].clone());
+    const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(v), this._doneMat);
+    line.position.y = 0.1;
+    this._group.add(line);
+    this._lines.push(line);
+  }
+
+  _clearStrokes() {
+    this.strokes = [];
+    for (const l of this._lines) { this._group.remove(l); l.geometry.dispose(); }
+    this._lines = [];
+    this._removeLive();
+  }
+}
+
+// Reconstrói a geometria extrudada a partir da especificação salva (usado
+// também ao mudar a altura e ao reabrir projetos).
+export function buildExtrudeGeometry(spec) {
+  const shapes = spec.outers.map(o => {
+    const shape = new THREE.Shape(o.pts.map(p => new THREE.Vector2(p[0], p[1])));
+    for (const h of o.holes) {
+      shape.holes.push(new THREE.Path(h.map(p => new THREE.Vector2(p[0], p[1]))));
+    }
+    return shape;
+  });
+  const geometry = new THREE.ExtrudeGeometry(shapes, {
+    depth: spec.depth, bevelEnabled: false, curveSegments: 12,
+  });
+  geometry.rotateX(-Math.PI / 2); // forma XY -> chão XZ, extrusão para +Y
+  geometry.computeBoundingBox();
+  const bb = geometry.boundingBox;
+  const cx = (bb.min.x + bb.max.x) / 2, cz = (bb.min.z + bb.max.z) / 2;
+  geometry.translate(-cx, 0, -cz);
+  return { geometry, center: new THREE.Vector3(cx, 0, cz) };
+}
+
+export function rebuildExtrudeDepth(mesh, depth) {
+  const spec = mesh.userData.extrude;
+  if (!spec) return;
+  spec.depth = depth;
+  const old = mesh.geometry;
+  // o contorno não muda, então o centro XZ é o mesmo e o pivô não pula
+  mesh.geometry = buildExtrudeGeometry({ outers: spec.outers, depth }).geometry;
+  old.dispose();
+}
+
+// ---------- utilidades geométricas ----------
+function area(pts) {
+  let a = 0;
+  for (let i = 0, n = pts.length; i < n; i++) {
+    const p = pts[i], q = pts[(i + 1) % n];
+    a += p.x * q.y - q.x * p.y;
+  }
+  return a / 2;
+}
+
+function ensureWinding(pts, ccw) {
+  const a = area(pts);
+  if ((ccw && a < 0) || (!ccw && a > 0)) return [...pts].reverse();
+  return pts;
+}
+
+function pointInPoly(p, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const a = poly[i], b = poly[j];
+    if ((a.y > p.y) !== (b.y > p.y) &&
+        p.x < ((b.x - a.x) * (p.y - a.y)) / (b.y - a.y) + a.x) inside = !inside;
+  }
+  return inside;
+}
+
+function smooth(pts) {
+  if (pts.length < 5) return pts;
+  const out = [pts[0]];
+  for (let i = 1; i < pts.length - 1; i++) {
+    out.push(new THREE.Vector2(
+      (pts[i - 1].x + pts[i].x * 2 + pts[i + 1].x) / 4,
+      (pts[i - 1].y + pts[i].y * 2 + pts[i + 1].y) / 4));
+  }
+  out.push(pts[pts.length - 1]);
+  return out;
+}
+
+// Ramer–Douglas–Peucker
+function simplify(pts, eps) {
+  if (pts.length < 3) return pts;
+  const keep = new Array(pts.length).fill(false);
+  keep[0] = keep[pts.length - 1] = true;
+  const stack = [[0, pts.length - 1]];
+  while (stack.length) {
+    const [s, e] = stack.pop();
+    let maxD = 0, idx = -1;
+    for (let i = s + 1; i < e; i++) {
+      const d = segDist(pts[i], pts[s], pts[e]);
+      if (d > maxD) { maxD = d; idx = i; }
+    }
+    if (maxD > eps && idx > 0) {
+      keep[idx] = true;
+      stack.push([s, idx], [idx, e]);
+    }
+  }
+  return pts.filter((_, i) => keep[i]);
+}
+
+function segDist(p, a, b) {
+  const dx = b.x - a.x, dy = b.y - a.y;
+  const len2 = dx * dx + dy * dy;
+  if (len2 === 0) return Math.hypot(p.x - a.x, p.y - a.y);
+  let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
+}
+
+function round3(v) { return Math.round(v * 1000) / 1000; }
