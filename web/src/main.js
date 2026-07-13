@@ -1,3 +1,4 @@
+import * as THREE from 'three';
 import { Viewport } from './viewport.js';
 import { History } from './history.js';
 import { Objects } from './objects.js';
@@ -49,4 +50,5 @@ if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol) &&
   navigator.serviceWorker.register('sw.js').catch(() => {});
 }
 
+app.THREE = THREE;
 window.App = app; // depuração e testes
