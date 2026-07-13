@@ -46081,6 +46081,7 @@ ${code}
     navigator.serviceWorker.register("sw.js").catch(() => {
     });
   }
+  app2.THREE = three_module_exports;
   window.App = app2;
 })();
 /*! Bundled license information:
