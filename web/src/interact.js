@@ -17,6 +17,8 @@ export class Interact {
     this.mode = 'translate';
     this.snapping = true;
     this.pickCallback = null; // modo "toque na outra peça" (mesclar)
+    this.pointPickCallback = null; // modo "toque num ponto" (furo)
+    this._sculpting = false;
 
     this.tc = new TransformControls(vp.camera, vp.renderer.domElement);
     this.tc.setSize(1.15);
@@ -73,7 +75,7 @@ export class Interact {
   select(obj) {
     if (obj === this.selected) { this.app.emit('selection-changed'); return; }
     this.selected = obj;
-    if (obj && this.mode !== 'none' && !this.app.paint.active) {
+    if (obj && this.mode !== 'none' && !this.app.paint.active && !this.app.sculpt.active) {
       this.tc.attach(obj);
       this.tc.visible = true;
       this.tc.enabled = true;
@@ -90,11 +92,12 @@ export class Interact {
   refreshSelection() { this._updateHelpers(); }
 
   startPick(callback) { this.pickCallback = callback; }
-  cancelPick() { this.pickCallback = null; }
+  cancelPick() { this.pickCallback = null; this.pointPickCallback = null; }
+  startPointPick(cb) { this.pointPickCallback = cb; }
 
   setMode(mode) {
     this.mode = mode;
-    if (mode === 'none' || this.app.paint.active) {
+    if (mode === 'none' || this.app.paint.active || this.app.sculpt.active) {
       this.tc.detach(); this.tc.visible = false; this.tc.enabled = false;
     } else {
       this.tc.setMode(mode);
@@ -206,6 +209,21 @@ export class Interact {
       return; // dedos orbitam normalmente no modo pintura
     }
 
+    if (this.app.sculpt.active) {
+      if (this._isPrecise(e) && e.button === 0) {
+        const hit = this._hitUserObject(e);
+        if (hit) {
+          e.stopPropagation();
+          this.app.viewport.container.setPointerCapture(e.pointerId);
+          if (this.app.sculpt.begin(hit)) { this._sculpting = true; this.app.sculpt.showCursorAt(hit); }
+        }
+      }
+      return; // dedos orbitam normalmente no modo escultura
+    }
+
+    // medição / seleção de ponto: só registra o toque; resolve no _onUp
+    if (this.app.measure.active || this.pointPickCallback) return;
+
     if (!this._isPrecise(e) || e.button !== 0) return;
     if (this._hitGizmo(e)) return;
 
@@ -256,6 +274,24 @@ export class Interact {
       return;
     }
 
+    if (this._sculpting) {
+      e.stopPropagation();
+      const hit = this._hitUserObject(e);
+      if (hit) { this.app.sculpt.stroke(hit); this.app.sculpt.showCursorAt(hit); }
+      return;
+    }
+
+    if (this.app.sculpt.active) {
+      if (this._isCanvas(e) && this._isPrecise(e) && e.buttons === 0) {
+        const now = performance.now();
+        if (now - this._lastHoverCheck > 40) {
+          this._lastHoverCheck = now;
+          this.app.sculpt.showCursorAt(this._hitUserObject(e));
+        }
+      }
+      return;
+    }
+
     if (this._planeDrag && e.pointerId === this._planeDrag.pointerId) {
       e.stopPropagation();
       const d = this._planeDrag;
@@ -299,6 +335,13 @@ export class Interact {
       return;
     }
 
+    if (this._sculpting) {
+      e.stopPropagation();
+      this._sculpting = false;
+      this.app.sculpt.end();
+      return;
+    }
+
     if (this._planeDrag && e.pointerId === this._planeDrag.pointerId) {
       e.stopPropagation();
       const d = this._planeDrag;
@@ -307,9 +350,20 @@ export class Interact {
       return;
     }
 
-    // toque curto: escolher peça (mesclar) / selecionar / limpar seleção
-    if (tap && !tap.moved && performance.now() - tap.t < 500) {
+    // toque curto: medir / furar / escolher peça / selecionar
+    if (tap && !tap.moved && performance.now() - tap.t < 600) {
       if (!this._isCanvas(e)) return;
+      const visible = this.app.objects.list.filter(o => o.visible);
+      if (this.app.measure.active) {
+        this.app.measure.tap(this.app.viewport.pickPoint(e, visible));
+        return;
+      }
+      if (this.pointPickCallback) {
+        const cb = this.pointPickCallback;
+        this.pointPickCallback = null;
+        cb(this.app.viewport.pickPoint(e, visible));
+        return;
+      }
       if (this._hitGizmo(e)) return;
       const hit = this._hitUserObject(e);
       if (this.pickCallback) {
@@ -318,7 +372,7 @@ export class Interact {
         cb(hit ? hit.root : null);
         return;
       }
-      if (this.app.paint.active) return; // no modo pintura o toque não seleciona
+      if (this.app.paint.active || this.app.sculpt.active) return;
       this.select(hit ? hit.root : null);
     }
   }
@@ -326,6 +380,7 @@ export class Interact {
   _onCancel(e) {
     this._taps.delete(e.pointerId);
     if (this._painting) { this._painting = false; this.app.paint.strokeEnd(); }
+    if (this._sculpting) { this._sculpting = false; this.app.sculpt.end(); }
     if (this._planeDrag && e.pointerId === this._planeDrag.pointerId) {
       this._restore(this._planeDrag.obj, this._planeDrag.before);
       this._planeDrag = null;

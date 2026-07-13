@@ -2,12 +2,14 @@ import * as THREE from 'three';
 import { FINISHES } from './objects.js';
 import { rebuildExtrudeDepth } from './sketch.js';
 import { imageToReliefData, imageToContourGeometry, buildReliefGeometry, b64ToGray } from './shapegen.js';
+import { CODE_EXAMPLES } from './codegen.js';
 import * as IO from './io.js';
 
 const $ = (id) => document.getElementById(id);
 const EYE_ON = '<svg viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>';
 const EYE_OFF = '<svg viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/><path d="M4 4l16 16"/></svg>';
 const RECENT_KEY = 'korx3d.recentColors';
+const escapeHtml = (s) => String(s).replace(/[<>&"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
 
 export class UI {
   constructor(app) {
@@ -24,6 +26,7 @@ export class UI {
     this._bindPaintbar();
     this._bindViewbar();
     this._bindPanel();
+    this._bindNewTools();
     this._bindKeyboard();
 
     app.on('selection-changed', () => this.refresh());
@@ -32,6 +35,8 @@ export class UI {
     app.on('mode-changed', () => this.refreshModes());
     app.on('sketch-changed', () => this.refreshSketch());
     app.on('paint-changed', () => this.refreshPaint());
+    app.on('sculpt-changed', () => this.refreshSculpt());
+    app.on('measure-changed', () => this.refreshMeasure());
 
     window.addEventListener('error', (e) => {
       const now = Date.now();
@@ -94,12 +99,16 @@ export class UI {
 
   // ------------------------------------------------ ferramentas
   _bindToolbar() {
-    $('toolAdd').onclick = () => $('primShelf').classList.toggle('hidden');
+    this._addOnPiece = $('addOnPiece');
+    $('toolAdd').onclick = () => {
+      $('cadShelf') && $('cadShelf').classList.add('hidden');
+      $('primShelf').classList.toggle('hidden');
+    };
     document.querySelectorAll('#primShelf .prim[data-prim]').forEach(btn => {
       btn.onclick = () => {
         $('primShelf').classList.add('hidden');
         const mesh = this.app.objects.createPrimitive(btn.dataset.prim);
-        if (mesh) this.app.objects.add(mesh);
+        if (mesh) { this._placeNew(mesh); this.app.objects.add(mesh); }
       };
     });
     $('primText').onclick = () => { $('primShelf').classList.add('hidden'); this._textDialog(); };
@@ -108,10 +117,11 @@ export class UI {
       $('fileInput').click();
       this.toast('Escolha uma imagem (PNG/JPG) para virar 3D');
     };
-    // fecha o menu apenas quando o toque é no próprio canvas
+    // fecha os menus apenas quando o toque é no próprio canvas
     this.app.viewport.container.addEventListener('pointerdown', (e) => {
       if (e.target === this.app.viewport.renderer.domElement) {
         $('primShelf').classList.add('hidden');
+        $('cadShelf') && $('cadShelf').classList.add('hidden');
       }
     }, { capture: true });
 
@@ -161,7 +171,24 @@ export class UI {
       this.app.paint.setActive(false);
       this.app.interact.setMode(this.app.interact.mode);
     }
+    if (this.app.sculpt.active) {
+      this.app.sculpt.setActive(false);
+      this.app.interact.setMode(this.app.interact.mode);
+    }
+    if (this.app.measure.active) this.app.measure.setActive(false);
     this.app.interact.cancelPick();
+    const cad = $('cadShelf'); if (cad) cad.classList.add('hidden');
+    const prim = $('primShelf'); if (prim) prim.classList.add('hidden');
+  }
+
+  // se houver peça selecionada e o modo "sobre a peça" estiver ligado,
+  // apoia o novo objeto no topo dela; senão deixa no chão.
+  _placeNew(mesh) {
+    const sel = this.app.interact.selected;
+    if (mesh && sel && sel !== mesh && this._addOnPiece && this._addOnPiece.checked) {
+      this.app.objects.placeOnTop(mesh, sel);
+    }
+    return mesh;
   }
 
   _setMode(mode) {
@@ -200,6 +227,8 @@ export class UI {
       this.app.paint.setRadius(v);
       $('paintSizeVal').textContent = v + ' mm';
     });
+    $('paintModePaint').onclick = () => this.app.paint.setMode('paint');
+    $('paintModeErase').onclick = () => this.app.paint.setMode('erase');
     $('paintDone').onclick = () => {
       this.app.paint.setActive(false);
       this.app.interact.setMode(this.app.interact.mode);
@@ -208,8 +237,13 @@ export class UI {
 
   refreshPaint() {
     const on = this.app.paint.active;
+    const erase = this.app.paint.mode === 'erase';
     $('paintbar').classList.toggle('hidden', !on);
-    $('toolPaint').classList.toggle('active', on);
+    $('toolPaint').classList.toggle('active', on && !erase);
+    if ($('toolErase')) $('toolErase').classList.toggle('active', on && erase);
+    $('paintModePaint').classList.toggle('active', !erase);
+    $('paintModeErase').classList.toggle('active', erase);
+    $('paintColor').style.opacity = erase ? '0.4' : '1';
   }
 
   // ------------------------------------------------ vistas
@@ -604,12 +638,15 @@ export class UI {
       b.classList.toggle('active', b.dataset.stool === sk.tool);
     });
     $('sketchMagic').classList.toggle('active', sk.magic);
-    $('sketchDone').disabled = !sk.strokes.length;
+    $('sketchMagic').style.display = sk.tool === 'points' ? 'none' : '';
+    $('sketchDone').disabled = !sk.hasContent();
     $('sketchDoneLabel').textContent = sk.mode === 'cut' ? 'Cortar' : 'Extrudar';
     $('sketchHint').textContent = sk.mode === 'cut'
       ? 'Desenhe o recorte sobre a peça'
-      : 'Desenhe com a caneta · dedos movem a vista';
-    for (const id of ['toolAdd', 'toolPaint', 'btnMerge', 'modeTranslate', 'modeRotate', 'modeScale', 'btnDuplicate', 'btnDelete', 'btnCut']) {
+      : (sk.tool === 'points' ? 'Toque para pontos · arraste um ponto para ajustar'
+        : 'Desenhe com a caneta · dedos movem a vista');
+    for (const id of ['toolAdd', 'toolPaint', 'toolErase', 'toolSculpt', 'toolMeasure', 'toolCode', 'btnCad', 'btnMerge', 'modeTranslate', 'modeRotate', 'modeScale', 'btnDuplicate', 'btnDelete', 'btnCut']) {
+      if (!$(id)) continue;
       if (sk.active) $(id).setAttribute('disabled', '');
       else if (!['btnDuplicate', 'btnDelete', 'btnCut', 'btnMerge'].includes(id)) $(id).removeAttribute('disabled');
     }
@@ -689,12 +726,16 @@ export class UI {
   }
 
   _textDialog() {
+    const sel = this.app.interact.selected;
+    const canFollow = !!sel;
     this.openModal(`
       <h2>Texto 3D</h2>
       <input id="txtValue" class="txt" placeholder="escreva aqui…" maxlength="40" value="Korx">
       <div class="sliderrow"><label>Altura</label><input type="range" id="txtSize" min="8" max="60" step="1" value="22"><span id="txtSizeVal">22</span></div>
       <div class="sliderrow"><label>Espessura</label><input type="range" id="txtDepth" min="2" max="24" step="1" value="6"><span id="txtDepthVal">6</span></div>
-      <p>Depois arraste o texto para cima da peça e use <b>Mesclar</b> para fixar os dois em uma peça única.</p>
+      <label class="check ${canFollow ? '' : 'off'}"><input type="checkbox" id="txtOnPiece" ${canFollow ? 'checked' : ''} ${canFollow ? '' : 'disabled'}> Colocar sobre a peça selecionada</label>
+      <label class="check ${canFollow ? '' : 'off'}"><input type="checkbox" id="txtFollow" ${canFollow ? '' : 'disabled'}> Acompanhar o contorno (ondulado) da peça</label>
+      <p>Sem “acompanhar”, o texto fica reto sobre a peça. Use <b>Mesclar</b> depois para fixá-lo definitivamente.</p>
       <div class="mrow">
         <button class="mbtn" id="txtCancel">Cancelar</button>
         <button class="mbtn primary" id="txtGo">Criar</button>
@@ -706,12 +747,23 @@ export class UI {
       const text = $('txtValue').value.trim();
       const sizeMM = Number($('txtSize').value);
       const depthMM = Number($('txtDepth').value);
+      const onPiece = $('txtOnPiece') && $('txtOnPiece').checked;
+      const follow = $('txtFollow') && $('txtFollow').checked;
       this.closeModal();
       if (!text) return;
       this.showLoading('Gerando texto 3D…');
       setTimeout(() => {
         try {
           const mesh = this.app.objects.createText(text, { sizeMM, depthMM });
+          const target = this.app.interact.selected;
+          if (onPiece && target && target !== mesh) {
+            this.app.objects.placeOnTop(mesh, target);
+            if (follow) {
+              const ok = this.app.objects.drapeOnSurface(mesh, target);
+              if (!ok) this.toast('Texto colocado reto (não achei a superfície)');
+              else this.toast('Texto acompanhando o contorno da peça');
+            }
+          }
           this.app.objects.add(mesh);
         } catch (err) {
           console.error(err);
@@ -800,6 +852,248 @@ export class UI {
         }
       };
     });
+  }
+
+  // ================================================================
+  // Ferramentas novas: borracha, escultura, medir, CAD, código, régua
+  // ================================================================
+  _bindNewTools() {
+    // borracha (pinta em modo apagar)
+    if ($('toolErase')) $('toolErase').onclick = () => {
+      const wasErase = this.app.paint.active && this.app.paint.mode === 'erase';
+      this._stopModes();
+      if (!wasErase) {
+        this.app.paint.setActive(true, 'erase');
+        this.app.interact.setMode(this.app.interact.mode);
+        this.toast('Borracha: apague a tinta com a caneta');
+      }
+    };
+
+    // escultura
+    if ($('toolSculpt')) $('toolSculpt').onclick = () => {
+      const on = !this.app.sculpt.active;
+      if (on) { this._stopModes(); this.app.sculpt.setActive(true, this.app.sculpt.mode); }
+      else this.app.sculpt.setActive(false);
+      this.app.interact.setMode(this.app.interact.mode);
+      if (on) this.toast('Esculpa arrastando a caneta sobre a peça');
+    };
+    document.querySelectorAll('#sculptbar [data-smode]').forEach(b => {
+      b.onclick = () => this.app.sculpt.setMode(b.dataset.smode);
+    });
+    if ($('sculptSize')) $('sculptSize').addEventListener('input', () => {
+      const v = Number($('sculptSize').value);
+      this.app.sculpt.setRadius(v);
+      $('sculptSizeVal').textContent = v + ' mm';
+    });
+    if ($('sculptStrength')) $('sculptStrength').addEventListener('input', () => {
+      const v = Number($('sculptStrength').value);
+      this.app.sculpt.setStrength(v);
+      $('sculptStrengthVal').textContent = v.toFixed(1);
+    });
+    if ($('sculptDone')) $('sculptDone').onclick = () => {
+      this.app.sculpt.setActive(false);
+      this.app.interact.setMode(this.app.interact.mode);
+    };
+
+    // medir
+    if ($('toolMeasure')) $('toolMeasure').onclick = () => {
+      const on = !this.app.measure.active;
+      if (on) this._stopModes();
+      this.app.measure.setActive(on);
+      if (on) this.toast('Toque em dois pontos para medir a distância');
+    };
+
+    // código
+    if ($('toolCode')) $('toolCode').onclick = () => { this._stopModes(); this._codeDialog(); };
+
+    // menu CAD
+    if ($('btnCad')) $('btnCad').onclick = () => {
+      $('primShelf') && $('primShelf').classList.add('hidden');
+      $('cadShelf').classList.toggle('hidden');
+    };
+    const cadDo = (fn) => { $('cadShelf').classList.add('hidden'); fn(); };
+    if ($('cadMirror')) $('cadMirror').onclick = () => cadDo(() => this._mirrorDialog());
+    if ($('cadArray')) $('cadArray').onclick = () => cadDo(() => this._arrayDialog());
+    if ($('cadHole')) $('cadHole').onclick = () => cadDo(() => this._holeFlow());
+    if ($('cadMeasure')) $('cadMeasure').onclick = () => cadDo(() => { this._stopModes(); this.app.measure.setActive(true); this.toast('Toque em dois pontos para medir'); });
+    if ($('cadRuler')) $('cadRuler').onclick = () => cadDo(() => this._toggleRuler());
+    if ($('cadOrtho')) $('cadOrtho').onclick = () => cadDo(() => this._toggleOrtho());
+
+    // acessórios no painel
+    if ($('accRuler')) $('accRuler').onclick = () => this._toggleRuler();
+    if ($('accOrtho')) $('accOrtho').onclick = () => this._toggleOrtho();
+    if ($('accMeasure')) $('accMeasure').onclick = () => { this._stopModes(); this.app.measure.setActive(true); this.toast('Toque em dois pontos para medir'); };
+
+    // gaveta de ferramentas do painel (tudo acessível pela lateral)
+    document.querySelectorAll('#panelTools [data-tool]').forEach(b => {
+      b.onclick = () => {
+        const t = b.dataset.tool;
+        const el = $(t);
+        if (el) el.click();
+      };
+    });
+
+    // a régua aparece automaticamente ao mexer na escala
+    ['scaleDown', 'scaleUp', 'scalePct'].forEach(id => {
+      const el = $(id);
+      if (el) el.addEventListener('pointerdown', () => {
+        if (!this.app.ruler.visible) {
+          this.app.ruler.setVisible(true);
+          if ($('accRuler')) $('accRuler').classList.add('active');
+        }
+      });
+    });
+  }
+
+  _toggleRuler() {
+    const on = !this.app.ruler.visible;
+    this.app.ruler.setVisible(on);
+    if ($('accRuler')) $('accRuler').classList.toggle('active', on);
+    if ($('cadRuler')) $('cadRuler').classList.toggle('active', on);
+    this.toast(on ? 'Régua mm/cm ligada' : 'Régua desligada');
+  }
+
+  _toggleOrtho() {
+    const on = !this.app.viewport.isOrtho;
+    this.app.viewport.setOrtho(on);
+    if ($('accOrtho')) $('accOrtho').classList.toggle('active', on);
+    if ($('cadOrtho')) $('cadOrtho').classList.toggle('active', on);
+    this.toast(on ? 'Vista ortográfica (paralela)' : 'Vista em perspectiva');
+  }
+
+  refreshSculpt() {
+    const sk = this.app.sculpt;
+    $('sculptbar') && $('sculptbar').classList.toggle('hidden', !sk.active);
+    if ($('toolSculpt')) $('toolSculpt').classList.toggle('active', sk.active);
+    document.querySelectorAll('#sculptbar [data-smode]').forEach(b => {
+      b.classList.toggle('active', b.dataset.smode === sk.mode);
+    });
+    if (sk.active) $('emptyHint') && $('emptyHint').classList.add('hidden');
+  }
+
+  refreshMeasure() {
+    const on = this.app.measure.active;
+    if ($('toolMeasure')) $('toolMeasure').classList.toggle('active', on);
+    if ($('accMeasure')) $('accMeasure').classList.toggle('active', on);
+  }
+
+  // ---------- espelhar ----------
+  _mirrorDialog() {
+    const sel = this.app.interact.selected;
+    if (!sel) { this.toast('Selecione uma peça para espelhar'); return; }
+    this.openModal(`
+      <h2>Espelhar</h2>
+      <p>Cria uma cópia espelhada de <b>${escapeHtml(sel.name)}</b>.</p>
+      <div class="choices">
+        <button class="choice active" data-axis="x">Eixo X</button>
+        <button class="choice" data-axis="z">Eixo Z</button>
+        <button class="choice" data-axis="y">Eixo Y</button>
+      </div>
+      <div class="mrow">
+        <button class="mbtn" id="mirCancel">Cancelar</button>
+        <button class="mbtn primary" id="mirGo">Espelhar</button>
+      </div>`);
+    const modal = $('modal');
+    modal.querySelectorAll('.choice').forEach(b => b.onclick = () => {
+      modal.querySelectorAll('.choice').forEach(x => x.classList.remove('active'));
+      b.classList.add('active');
+    });
+    $('mirCancel').onclick = () => this.closeModal();
+    $('mirGo').onclick = () => {
+      const axis = modal.querySelector('.choice.active').dataset.axis;
+      this.closeModal();
+      this.app.ops.mirror(sel, axis);
+    };
+  }
+
+  // ---------- matriz (padrão) ----------
+  _arrayDialog() {
+    const sel = this.app.interact.selected;
+    if (!sel) { this.toast('Selecione uma peça para repetir'); return; }
+    this.openModal(`
+      <h2>Matriz (repetir)</h2>
+      <div class="choices">
+        <button class="choice active" data-kind="linear">Linear</button>
+        <button class="choice" data-kind="circular">Circular</button>
+      </div>
+      <div class="sliderrow"><label>Cópias</label><input type="range" id="arrCount" min="2" max="24" step="1" value="4"><span id="arrCountVal">4</span></div>
+      <div class="sliderrow" id="arrSpaceRow"><label>Espaço</label><input type="range" id="arrSpace" min="5" max="120" step="1" value="30"><span id="arrSpaceVal">30 mm</span></div>
+      <div class="sliderrow hidden" id="arrRadRow"><label>Raio</label><input type="range" id="arrRad" min="20" max="150" step="5" value="60"><span id="arrRadVal">60 mm</span></div>
+      <div class="mrow">
+        <button class="mbtn" id="arrCancel">Cancelar</button>
+        <button class="mbtn primary" id="arrGo">Criar</button>
+      </div>`);
+    const modal = $('modal');
+    let kind = 'linear';
+    modal.querySelectorAll('.choice').forEach(b => b.onclick = () => {
+      modal.querySelectorAll('.choice').forEach(x => x.classList.remove('active'));
+      b.classList.add('active');
+      kind = b.dataset.kind;
+      $('arrSpaceRow').classList.toggle('hidden', kind !== 'linear');
+      $('arrRadRow').classList.toggle('hidden', kind !== 'circular');
+    });
+    $('arrCount').oninput = () => $('arrCountVal').textContent = $('arrCount').value;
+    $('arrSpace').oninput = () => $('arrSpaceVal').textContent = $('arrSpace').value + ' mm';
+    $('arrRad').oninput = () => $('arrRadVal').textContent = $('arrRad').value + ' mm';
+    $('arrCancel').onclick = () => this.closeModal();
+    $('arrGo').onclick = () => {
+      const count = Number($('arrCount').value);
+      this.closeModal();
+      if (kind === 'linear') this.app.ops.arrayLinear(sel, count, Number($('arrSpace').value), 'x');
+      else this.app.ops.arrayCircular(sel, count, Number($('arrRad').value));
+    };
+  }
+
+  // ---------- furo rápido ----------
+  _holeFlow() {
+    const sel = this.app.interact.selected;
+    if (!sel) { this.toast('Selecione a peça onde fazer o furo'); return; }
+    const diameter = 6;
+    this.toast('Toque no ponto do furo (Ø 6 mm)', 'Cancelar', () => this.app.interact.cancelPick(), 8000);
+    this.app.interact.startPointPick((pt) => {
+      if (!pt) { this.toast('Furo cancelado'); return; }
+      this.app.ops.drillHole(sel, pt.x, pt.z, diameter);
+    });
+  }
+
+  // ---------- codificação ----------
+  _codeDialog() {
+    const names = Object.keys(CODE_EXAMPLES);
+    const chips = names.map((n, i) => `<button class="chip ${i === 0 ? 'active' : ''}" data-ex="${escapeHtml(n)}">${escapeHtml(n)}</button>`).join('');
+    this.openModal(`
+      <h2>Codificação → 3D</h2>
+      <p>Escreva código (JavaScript) para gerar um objeto. Use <b>add(peça, cor)</b> e os ajudantes <b>K.box, K.cylinder, K.sphere, K.extrude, K.subtract, K.union…</b></p>
+      <div class="chips" id="codeExamples">${chips}</div>
+      <textarea id="codeArea" class="codearea" spellcheck="false"></textarea>
+      <div class="mrow">
+        <button class="mbtn" id="codeCancel">Fechar</button>
+        <button class="mbtn primary" id="codeRun">Executar</button>
+      </div>`);
+    const area = $('codeArea');
+    area.value = CODE_EXAMPLES[names[0]];
+    const modal = $('modal');
+    modal.querySelectorAll('#codeExamples .chip').forEach(b => b.onclick = () => {
+      modal.querySelectorAll('#codeExamples .chip').forEach(x => x.classList.remove('active'));
+      b.classList.add('active');
+      area.value = CODE_EXAMPLES[b.dataset.ex];
+    });
+    $('codeCancel').onclick = () => this.closeModal();
+    $('codeRun').onclick = () => {
+      const code = area.value;
+      this.closeModal();
+      this.showLoading('Executando código…');
+      setTimeout(() => {
+        try {
+          this.app.codegen.run(code);
+          this.toast('Objeto gerado pelo código');
+        } catch (err) {
+          console.error(err);
+          this.toast('Erro no código: ' + (err.message || err), null, null, 6000);
+        } finally {
+          this.hideLoading();
+        }
+      }, 30);
+    };
   }
 
   _helpDialog() {

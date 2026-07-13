@@ -238,6 +238,59 @@ export class Objects {
     obj.position.y -= box.min.y;
   }
 
+  // posiciona 'obj' apoiado sobre o topo de 'target' (centralizado ou em atPoint)
+  placeOnTop(obj, target, atPoint) {
+    obj.updateMatrixWorld(true);
+    const tbox = this.bounds(target);
+    const obox = this.bounds(obj);
+    const cx = atPoint ? atPoint.x : (tbox.min.x + tbox.max.x) / 2;
+    const cz = atPoint ? atPoint.z : (tbox.min.z + tbox.max.z) / 2;
+    const topY = atPoint ? atPoint.y : tbox.max.y;
+    obj.position.x += cx - (obox.min.x + obox.max.x) / 2;
+    obj.position.z += cz - (obox.min.z + obox.max.z) / 2;
+    obj.position.y += topY - obox.min.y;
+  }
+
+  // "drapeia" a malha sobre a superfície de 'target' seguindo o contorno/ondulado.
+  // Cada vértice desce até tocar o alvo (campo de altura) mantendo a espessura.
+  drapeOnSurface(obj, target, { lift = 0.4 } = {}) {
+    const mesh = obj.isMesh ? obj : this.firstMeshOf(obj);
+    if (!mesh) return false;
+    target.updateMatrixWorld(true);
+    mesh.updateMatrixWorld(true);
+    const ray = new THREE.Raycaster();
+    const down = new THREE.Vector3(0, -1, 0);
+    const tbox = this.bounds(target);
+    const top = tbox.max.y + 100;
+    const pos = mesh.geometry.attributes.position;
+    const cache = new Map();
+    const wx0 = mesh.position.x, wz0 = mesh.position.z;
+    let any = false;
+    for (let i = 0; i < pos.count; i++) {
+      const wx = wx0 + pos.getX(i), wz = wz0 + pos.getZ(i);
+      const key = Math.round(wx * 4) + '_' + Math.round(wz * 4);
+      let sy = cache.get(key);
+      if (sy === undefined) {
+        ray.set(new THREE.Vector3(wx, top, wz), down);
+        const hit = ray.intersectObject(target, true);
+        sy = hit.length ? hit[0].point.y : null;
+        cache.set(key, sy);
+      }
+      if (sy !== null) { pos.setY(i, pos.getY(i) + (sy - mesh.position.y) + lift); any = true; }
+    }
+    pos.needsUpdate = true;
+    mesh.geometry.computeVertexNormals();
+    mesh.geometry.computeBoundingBox();
+    mesh.userData.geomDirty = true;
+    return any;
+  }
+
+  firstMeshOf(obj) {
+    let m = null;
+    obj.traverse(o => { if (!m && o.isMesh) m = o; });
+    return m;
+  }
+
   bounds(obj) { return new THREE.Box3().setFromObject(obj); }
 
   boundsAll() {

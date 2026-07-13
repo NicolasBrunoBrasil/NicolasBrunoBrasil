@@ -12,6 +12,9 @@ export class Viewport {
 
     this.camera = new THREE.PerspectiveCamera(45, 1, 0.5, 20000);
     this.camera.position.set(150, 130, 170);
+    this.perspCamera = this.camera;
+    this.orthoCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, -5000, 20000);
+    this.isOrtho = false;
 
     this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
@@ -112,9 +115,37 @@ export class Viewport {
   _resize() {
     const w = this.container.clientWidth, h = this.container.clientHeight;
     if (!w || !h) return;
-    this.camera.aspect = w / h;
-    this.camera.updateProjectionMatrix();
+    this.perspCamera.aspect = w / h;
+    this.perspCamera.updateProjectionMatrix();
+    if (this.isOrtho) this._updateOrthoFrustum();
     this.renderer.setSize(w, h);
+  }
+
+  _updateOrthoFrustum() {
+    const w = this.container.clientWidth, h = this.container.clientHeight;
+    const aspect = w / h || 1;
+    const dist = this.orthoCamera.position.distanceTo(this.controls.target);
+    const halfH = Math.max(dist * Math.tan(THREE.MathUtils.degToRad(this.perspCamera.fov) / 2), 1);
+    const halfW = halfH * aspect;
+    const o = this.orthoCamera;
+    o.left = -halfW; o.right = halfW; o.top = halfH; o.bottom = -halfH;
+    o.updateProjectionMatrix();
+  }
+
+  // alterna entre perspectiva e ortográfica (paralela, estilo CAD)
+  setOrtho(on) {
+    if (on === this.isOrtho) return;
+    this.isOrtho = on;
+    const from = on ? this.perspCamera : this.orthoCamera;
+    const to = on ? this.orthoCamera : this.perspCamera;
+    to.position.copy(from.position);
+    to.quaternion.copy(from.quaternion);
+    to.zoom = 1;
+    this.camera = to;
+    this.controls.object = to;
+    if (on) this._updateOrthoFrustum(); else { to.aspect = this.container.clientWidth / this.container.clientHeight; to.updateProjectionMatrix(); }
+    if (this.app && this.app.interact && this.app.interact.tc) this.app.interact.tc.camera = to;
+    this.controls.update();
   }
 
   // ---- navegação/câmera ----
@@ -190,5 +221,12 @@ export class Viewport {
     this._ray.setFromCamera(this.pointerNDC(e), this.camera);
     const out = new THREE.Vector3();
     return this._ray.ray.intersectPlane(plane, out) ? out : null;
+  }
+
+  // ponto de picking: na primeira peça atingida ou, se nada, no chão (y=0)
+  pickPoint(e, objects) {
+    const hits = this.raycastFrom(e, objects || [], true);
+    if (hits.length) return hits[0].point.clone();
+    return this.planeHit(e, new THREE.Plane(new THREE.Vector3(0, 1, 0), 0));
   }
 }

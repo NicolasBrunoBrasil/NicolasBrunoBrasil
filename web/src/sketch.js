@@ -38,6 +38,15 @@ export class Sketch {
     this._lines = [];
     this._live = null;
     this._livePts = [];
+
+    // desenho por pontos (polilinha editável)
+    this._nodes = [];       // Vector2 nas coords do chão (x,z)
+    this._nodeDots = [];
+    this._nodeLine = null;
+    this._dragNode = -1;
+    this._nodeMat = new THREE.MeshBasicMaterial({ color: 0x4fc3f7, depthTest: false });
+    this._nodeMatDrag = new THREE.MeshBasicMaterial({ color: 0xffca28, depthTest: false });
+    this._nodeGeo = new THREE.SphereGeometry(1.7, 14, 10);
   }
 
   enter(opts = {}) {
@@ -91,6 +100,13 @@ export class Sketch {
     if (!p) return;
     this.stroking = true;
     this._start = new THREE.Vector2(p.x, p.z);
+    this._downXY = { x: e.clientX, y: e.clientY };
+
+    if (this.tool === 'points') {
+      // se tocou perto de um nó existente, começa a arrastá-lo
+      this._dragNode = this._nearestNode(this._start, 6);
+      return;
+    }
     this._livePts = [this._start.clone()];
     this._ensureLive();
   }
@@ -99,6 +115,17 @@ export class Sketch {
     if (!this.stroking) return;
     const p = this.app.viewport.planeHit(e, this._plane);
     if (!p) return;
+
+    if (this.tool === 'points') {
+      if (this._dragNode >= 0) {
+        const np = new THREE.Vector2(p.x, p.z);
+        if (this.app.interact.snapping) { np.x = Math.round(np.x); np.y = Math.round(np.y); }
+        this._nodes[this._dragNode].copy(np);
+        this._renderNodes();
+      }
+      return;
+    }
+
     const cur = new THREE.Vector2(p.x, p.z);
     if (this.tool === 'free') {
       const last = this._livePts[this._livePts.length - 1];
@@ -124,9 +151,28 @@ export class Sketch {
     this._updateLive();
   }
 
-  pointerUp() {
+  pointerUp(e) {
     if (!this.stroking) return;
     this.stroking = false;
+
+    if (this.tool === 'points') {
+      const moved = e && this._downXY &&
+        (Math.abs(e.clientX - this._downXY.x) > 8 || Math.abs(e.clientY - this._downXY.y) > 8);
+      if (this._dragNode >= 0) {
+        this._dragNode = -1;
+        this._renderNodes();
+      } else if (!moved && this._start) {
+        // toque curto sem arrastar: adiciona um nó
+        const np = this._start.clone();
+        if (this.app.interact.snapping) { np.x = Math.round(np.x); np.y = Math.round(np.y); }
+        this._nodes.push(np);
+        this._renderNodes();
+      }
+      this._dragNode = -1;
+      this.app.emit('sketch-changed');
+      return;
+    }
+
     let pts = this._livePts;
     this._livePts = [];
     this._removeLive();
@@ -156,6 +202,12 @@ export class Sketch {
   }
 
   undoStroke() {
+    if (this.tool === 'points' && this._nodes.length) {
+      this._nodes.pop();
+      this._renderNodes();
+      this.app.emit('sketch-changed');
+      return;
+    }
     if (!this.strokes.length) return;
     this.strokes.pop();
     const line = this._lines.pop();
@@ -163,10 +215,45 @@ export class Sketch {
     this.app.emit('sketch-changed');
   }
 
+  hasContent() { return this.strokes.length > 0 || this._nodes.length >= 3; }
+
+  _nearestNode(p, maxDist) {
+    let best = -1, bestD = maxDist;
+    for (let i = 0; i < this._nodes.length; i++) {
+      const d = this._nodes[i].distanceTo(p);
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    return best;
+  }
+
+  _renderNodes() {
+    for (const d of this._nodeDots) this._group.remove(d);
+    this._nodeDots = [];
+    for (let i = 0; i < this._nodes.length; i++) {
+      const n = this._nodes[i];
+      const dot = new THREE.Mesh(this._nodeGeo, i === this._dragNode ? this._nodeMatDrag : this._nodeMat);
+      dot.position.set(n.x, 0.3, n.y);
+      dot.renderOrder = 999;
+      this._group.add(dot);
+      this._nodeDots.push(dot);
+    }
+    if (this._nodeLine) { this._group.remove(this._nodeLine); this._nodeLine.geometry.dispose(); this._nodeLine = null; }
+    if (this._nodes.length >= 2) {
+      const v = this._nodes.map(n => new THREE.Vector3(n.x, 0.15, n.y));
+      if (this._nodes.length >= 3) v.push(v[0].clone());
+      this._nodeLine = new THREE.Line(new THREE.BufferGeometry().setFromPoints(v),
+        this.mode === 'cut' ? this._cutMat : this._lineMat);
+      this._group.add(this._nodeLine);
+    }
+  }
+
   // ---------- conclusão ----------
   finish() {
-    if (!this.strokes.length) { this.exit(true); return; }
-    const polys = this.strokes.map(pts => pts.map(p => ({ x: p.x, y: -p.y }))); // chão -> forma
+    // inclui a polilinha de pontos, se houver
+    const allStrokes = [...this.strokes];
+    if (this._nodes.length >= 3) allStrokes.push(this._nodes.map(n => n.clone()));
+    if (!allStrokes.length) { this.exit(true); return; }
+    const polys = allStrokes.map(pts => pts.map(p => ({ x: p.x, y: -p.y }))); // chão -> forma
     const spec = buildSpecFromPolys(polys, this.defaultDepth);
     if (!spec) { this.exit(true); return; }
 
@@ -233,6 +320,11 @@ export class Sketch {
     for (const l of this._lines) { this._group.remove(l); l.geometry.dispose(); }
     this._lines = [];
     this._removeLive();
+    for (const d of this._nodeDots) this._group.remove(d);
+    this._nodeDots = [];
+    this._nodes = [];
+    this._dragNode = -1;
+    if (this._nodeLine) { this._group.remove(this._nodeLine); this._nodeLine.geometry.dispose(); this._nodeLine = null; }
   }
 }
 

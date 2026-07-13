@@ -253,6 +253,63 @@ input[type="range"] { flex: 1; accent-color: var(--accent); height: 26px; }
 #picker .mbtn { flex: 1; padding: 12px; border-radius: 12px; background: var(--panel2); font-weight: 500; }
 #picker .mbtn.primary { background: var(--accent); color: #06283a; font-weight: 600; }
 
+/* ---------- barras de escultura / pontos / CAD ---------- */
+#sculptbar {
+  left: 50%; top: 12px; transform: translateX(-50%); z-index: 5;
+  flex-wrap: wrap; max-width: calc(100% - 24px); justify-content: center;
+}
+#sculptbar input[type="range"] { width: 100px; }
+#paintbar input[type="range"] { width: 120px; }
+
+#primShelf { display: flex; flex-direction: column; gap: 8px; }
+.prim-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; }
+#cadShelf.cad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+
+.check {
+  display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--txt);
+  padding: 4px 2px;
+}
+.check input { width: 20px; height: 20px; accent-color: var(--accent); flex: none; }
+.check.off { opacity: .45; }
+.on-piece { background: var(--panel2); border-radius: 10px; padding: 8px 10px; }
+
+/* régua e medição sobre o viewport */
+#rulerCanvas {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  pointer-events: none; display: none; z-index: 4;
+}
+#measureLabel {
+  position: absolute; z-index: 6; display: none; pointer-events: none;
+  transform: translate(-50%, -50%);
+  background: #ffca28; color: #1a1200; font-size: 12.5px; font-weight: 600;
+  padding: 3px 8px; border-radius: 8px; white-space: nowrap;
+  box-shadow: 0 2px 8px rgba(0,0,0,.5);
+}
+
+/* gaveta de ferramentas e acessórios no painel */
+.toolgrid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; }
+.pchip {
+  padding: 10px 8px; border-radius: 10px; background: var(--panel2);
+  border: 1px solid var(--line); color: var(--txt); font-size: 12.5px; text-align: center;
+}
+.pchip:active { background: var(--accent2); }
+.pchip.active { border-color: var(--accent); color: var(--accent); }
+
+/* editor de código */
+.codearea {
+  width: 100%; min-height: 200px; resize: vertical;
+  background: #0c1016; border: 1px solid var(--line); border-radius: 10px;
+  color: #cfe6ff; padding: 10px 12px; margin: 6px 0 4px;
+  font-family: "Cascadia Code", "Roboto Mono", ui-monospace, monospace; font-size: 12.5px;
+  line-height: 1.5; white-space: pre; overflow: auto; outline: none;
+}
+.codearea:focus { border-color: var(--accent2); }
+
+/* rolagem suave do painel direito */
+#panel { -webkit-overflow-scrolling: touch; scroll-behavior: smooth; scrollbar-width: thin; }
+#panel::-webkit-scrollbar { width: 8px; }
+#panel::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
+
 /* ---------- narrow screens (portrait) ---------- */
 @media (max-width: 900px) {
   #panel {
