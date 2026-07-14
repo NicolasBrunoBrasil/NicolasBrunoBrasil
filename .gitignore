@@ -3,3 +3,4 @@ build/
 package.json
 package-lock.json
 *.log
+apk/*.zip
