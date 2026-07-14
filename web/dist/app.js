@@ -33049,8 +33049,18 @@
     // ---------- conclusão ----------
     finish() {
       const allStrokes = [...this.strokes];
-      if (this._nodes.length >= 3)
-        allStrokes.push(this._nodes.map((n) => n.clone()));
+      if (this._nodes.length >= 3) {
+        let pts = catmullRomClosed(this._nodes, 14);
+        pts = simplify(pts, 0.5);
+        if (this.magic) {
+          const rec = recognizeShape(pts);
+          if (rec) {
+            pts = rec.pts.map((p) => new Vector2(p.x, p.y));
+            this.app.ui.toast(`\u2728 Corrigido: ${rec.label}`);
+          }
+        }
+        allStrokes.push(pts);
+      }
       if (!allStrokes.length) {
         this.exit(true);
         return;
@@ -33272,6 +33282,22 @@
   }
   function round3(v) {
     return Math.round(v * 1e3) / 1e3;
+  }
+  function catmullRomClosed(nodes, perSeg) {
+    const n = nodes.length;
+    if (n < 3)
+      return nodes.map((p) => p.clone());
+    const out = [];
+    for (let i = 0; i < n; i++) {
+      const p0 = nodes[(i - 1 + n) % n], p1 = nodes[i], p2 = nodes[(i + 1) % n], p3 = nodes[(i + 2) % n];
+      for (let s = 0; s < perSeg; s++) {
+        const t = s / perSeg, t2 = t * t, t3 = t2 * t;
+        const x = 0.5 * (2 * p1.x + (-p0.x + p2.x) * t + (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 + (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3);
+        const y = 0.5 * (2 * p1.y + (-p0.y + p2.y) * t + (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 + (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3);
+        out.push(new Vector2(x, y));
+      }
+    }
+    return out;
   }
 
   // web/src/shapegen.js
@@ -33560,6 +33586,18 @@
     torus: "Anel",
     plate: "Placa",
     wedge: "Rampa",
+    tube: "Tubo",
+    pyramid: "Pir\xE2mide",
+    hexprism: "Prisma 6",
+    triprism: "Prisma 3",
+    star: "Estrela",
+    heart: "Cora\xE7\xE3o",
+    dome: "C\xFApula",
+    capsule: "C\xE1psula",
+    disc: "Disco",
+    washer: "Arruela",
+    gear: "Engrenagem",
+    lbracket: "Cantoneira",
     extrude: "Esbo\xE7o",
     import: "Modelo",
     text: "Texto",
@@ -33648,6 +33686,33 @@
           g.center();
           return g;
         }
+        case "pyramid": {
+          const g = new ConeGeometry(15, 22, 4);
+          g.rotateY(Math.PI / 4);
+          return g;
+        }
+        case "hexprism":
+          return new CylinderGeometry(13, 13, 20, 6);
+        case "triprism":
+          return new CylinderGeometry(13, 13, 20, 3);
+        case "capsule":
+          return new CapsuleGeometry(8, 16, 8, 24);
+        case "disc":
+          return new CylinderGeometry(16, 16, 4, 56);
+        case "dome":
+          return new SphereGeometry(14, 48, 24, 0, Math.PI * 2, 0, Math.PI / 2);
+        case "tube":
+          return extrudeUp(ringShape(12, 7), 20);
+        case "washer":
+          return extrudeUp(ringShape(15, 7), 4);
+        case "star":
+          return extrudeUp(starShape(5, 16, 7), 8);
+        case "heart":
+          return extrudeUp(heartShape(1), 8);
+        case "gear":
+          return extrudeUp(gearShape(16, 15, 12, 5), 8);
+        case "lbracket":
+          return extrudeUp(lShape(28, 28, 9), 16);
         default:
           return null;
       }
@@ -33886,6 +33951,83 @@
       });
     }
   };
+  function extrudeUp(shape, depth) {
+    const g = new ExtrudeGeometry(shape, { depth, bevelEnabled: false, curveSegments: 24 });
+    g.rotateX(-Math.PI / 2);
+    g.computeBoundingBox();
+    const bb = g.boundingBox;
+    g.translate(-(bb.min.x + bb.max.x) / 2, -bb.min.y, -(bb.min.z + bb.max.z) / 2);
+    g.computeVertexNormals();
+    return g;
+  }
+  function ringShape(outer, inner) {
+    const shape = new Shape();
+    shape.absarc(0, 0, outer, 0, Math.PI * 2, false);
+    const hole = new Path();
+    hole.absarc(0, 0, inner, 0, Math.PI * 2, true);
+    shape.holes.push(hole);
+    return shape;
+  }
+  function starShape(spikes, outer, inner) {
+    const shape = new Shape();
+    const n = spikes * 2;
+    for (let i = 0; i < n; i++) {
+      const r = i % 2 === 0 ? outer : inner;
+      const a = i / n * Math.PI * 2 - Math.PI / 2;
+      const x = Math.cos(a) * r, y = Math.sin(a) * r;
+      if (i === 0)
+        shape.moveTo(x, y);
+      else
+        shape.lineTo(x, y);
+    }
+    shape.closePath();
+    return shape;
+  }
+  function heartShape(scale) {
+    const shape = new Shape();
+    const n = 90;
+    for (let i = 0; i <= n; i++) {
+      const t = i / n * Math.PI * 2;
+      const x = 16 * Math.pow(Math.sin(t), 3);
+      const y = 13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t);
+      const px2 = x * scale, py2 = y * scale;
+      if (i === 0)
+        shape.moveTo(px2, py2);
+      else
+        shape.lineTo(px2, py2);
+    }
+    shape.closePath();
+    return shape;
+  }
+  function gearShape(teeth, outer, root, holeR) {
+    const shape = new Shape();
+    const steps = teeth * 4;
+    for (let i = 0; i < steps; i++) {
+      const a = i / steps * Math.PI * 2;
+      const r = Math.floor(i / 2) % 2 === 0 ? outer : root;
+      const x = Math.cos(a) * r, y = Math.sin(a) * r;
+      if (i === 0)
+        shape.moveTo(x, y);
+      else
+        shape.lineTo(x, y);
+    }
+    shape.closePath();
+    const hole = new Path();
+    hole.absarc(0, 0, holeR, 0, Math.PI * 2, true);
+    shape.holes.push(hole);
+    return shape;
+  }
+  function lShape(w, h, t) {
+    const shape = new Shape();
+    shape.moveTo(0, 0);
+    shape.lineTo(w, 0);
+    shape.lineTo(w, t);
+    shape.lineTo(t, t);
+    shape.lineTo(t, h);
+    shape.lineTo(0, h);
+    shape.closePath();
+    return shape;
+  }
 
   // node_modules/three/examples/jsm/controls/TransformControls.js
   var _raycaster = new Raycaster();
@@ -35355,6 +35497,8 @@
     }
     strokeBegin() {
       this._stroke = /* @__PURE__ */ new Map();
+      this._lastCenter = null;
+      this._lastMesh = null;
     }
     // mesh -> { old: Map(i->[r,g,b]) }
     strokeEnd() {
@@ -35394,15 +35538,28 @@
         return;
       }
       this._ensureVertexColors(mesh);
+      const scl = new Vector3().setFromMatrixScale(mesh.matrixWorld);
+      const r = this.radius / Math.max(scl.x, scl.y, scl.z, 1e-6);
+      const local = mesh.worldToLocal(hit.point.clone());
+      const centers = [local];
+      if (this._lastMesh === mesh && this._lastCenter && tris < 25e4) {
+        const gap = local.distanceTo(this._lastCenter);
+        const stepLen = r * 0.4;
+        const n = Math.min(8, Math.floor(gap / stepLen));
+        for (let s = 1; s <= n; s++) {
+          centers.unshift(this._lastCenter.clone().lerp(local, s / (n + 1)));
+        }
+      }
+      for (const c of centers)
+        this._dab(mesh, c, r);
+      this._lastCenter = local.clone();
+      this._lastMesh = mesh;
+    }
+    // uma "estampa" do pincel: mistura a cor por vértice com falloff suave
+    _dab(mesh, center, r) {
       const g = mesh.geometry;
       const pos = g.attributes.position;
       const col = g.attributes.color;
-      const index = g.index;
-      const count = index ? index.count : pos.count;
-      const get = (k) => index ? index.getX(k) : k;
-      const local = mesh.worldToLocal(hit.point.clone());
-      const scl = new Vector3().setFromMatrixScale(mesh.matrixWorld);
-      const r = this.radius / Math.max(scl.x, scl.y, scl.z, 1e-6);
       const r2 = r * r;
       const base = mesh.userData.paintBase || [1, 1, 1];
       const cr = this.mode === "erase" ? base[0] : this.color.r;
@@ -35411,23 +35568,22 @@
       let rec = this._stroke ? this._stroke.get(mesh) : null;
       if (this._stroke && !rec)
         this._stroke.set(mesh, rec = { old: /* @__PURE__ */ new Map() });
-      const a = new Vector3(), b = new Vector3(), c = new Vector3();
       let changed = false;
-      for (let i = 0; i < count; i += 3) {
-        const i0 = get(i), i1 = get(i + 1), i2 = get(i + 2);
-        a.fromBufferAttribute(pos, i0);
-        b.fromBufferAttribute(pos, i1);
-        c.fromBufferAttribute(pos, i2);
-        const mx = (a.x + b.x + c.x) / 3 - local.x;
-        const my = (a.y + b.y + c.y) / 3 - local.y;
-        const mz = (a.z + b.z + c.z) / 3 - local.z;
-        if (mx * mx + my * my + mz * mz > r2)
+      for (let i = 0; i < pos.count; i++) {
+        const dx = pos.getX(i) - center.x, dy = pos.getY(i) - center.y, dz = pos.getZ(i) - center.z;
+        const d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 > r2)
           continue;
-        for (const vi of [i0, i1, i2]) {
-          if (rec && !rec.old.has(vi))
-            rec.old.set(vi, [col.getX(vi), col.getY(vi), col.getZ(vi)]);
-          col.setXYZ(vi, cr, cg, cb);
-        }
+        const t = 1 - Math.sqrt(d2) / r;
+        const w = Math.min(1, t * t * (3 - 2 * t) * 1.8);
+        if (rec && !rec.old.has(i))
+          rec.old.set(i, [col.getX(i), col.getY(i), col.getZ(i)]);
+        col.setXYZ(
+          i,
+          col.getX(i) + (cr - col.getX(i)) * w,
+          col.getY(i) + (cg - col.getY(i)) * w,
+          col.getZ(i) + (cb - col.getZ(i)) * w
+        );
         changed = true;
       }
       if (changed)
@@ -35462,9 +35618,9 @@
       this.app = app3;
       this.active = false;
       this.mode = "inflar";
-      this.radius = 10;
-      this.strength = 1.2;
-      const geo = new RingGeometry(0.9, 1, 48);
+      this.radius = 12;
+      this.strength = 1;
+      const geo = new RingGeometry(0.92, 1, 56);
       geo.rotateX(-Math.PI / 2);
       this.cursor = new Mesh(geo, new MeshBasicMaterial({
         color: 9298175,
@@ -35478,6 +35634,8 @@
       app3.viewport.scene.add(this.cursor);
       this._stroke = null;
       this._mesh = null;
+      this._adj = null;
+      this._adjGeo = null;
     }
     setActive(on, mode) {
       this.active = on;
@@ -35521,6 +35679,7 @@
       this._stroke = { old: /* @__PURE__ */ new Map() };
       this._adj = null;
       this._lastLocal = mesh.worldToLocal(hit.point.clone());
+      this._lastWorld = hit.point.clone();
       this.stroke(hit);
       return true;
     }
@@ -35536,82 +35695,96 @@
       const avgScale = Math.max((scl.x + scl.y + scl.z) / 3, 1e-6);
       const r = this.radius / avgScale;
       const r2 = r * r;
-      const stepMM = this.strength / avgScale;
+      const step = Math.min(this.strength, this.radius * 0.5) / avgScale;
       const rec = this._stroke;
       const remember = (i) => {
         if (!rec.old.has(i))
           rec.old.set(i, [pos.getX(i), pos.getY(i), pos.getZ(i)]);
       };
+      const idx = [], w = [];
+      let nx = 0, ny = 0, nz = 0;
+      for (let i = 0; i < pos.count; i++) {
+        const dx = pos.getX(i) - local.x, dy = pos.getY(i) - local.y, dz = pos.getZ(i) - local.z;
+        const d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 > r2)
+          continue;
+        const fall = smooth2(1 - Math.sqrt(d2) / r);
+        idx.push(i);
+        w.push(fall);
+        nx += nrm.getX(i) * fall;
+        ny += nrm.getY(i) * fall;
+        nz += nrm.getZ(i) * fall;
+      }
+      if (!idx.length) {
+        this._after(hit, local);
+        return;
+      }
+      const nlen = Math.hypot(nx, ny, nz) || 1;
+      nx /= nlen;
+      ny /= nlen;
+      nz /= nlen;
       if (this.mode === "suavizar") {
-        const adj = this._adjacency(g);
-        const touched = [];
-        for (let i = 0; i < pos.count; i++) {
-          const dx = pos.getX(i) - local.x, dy = pos.getY(i) - local.y, dz = pos.getZ(i) - local.z;
-          const d2 = dx * dx + dy * dy + dz * dz;
-          if (d2 > r2)
-            continue;
-          touched.push([i, 1 - Math.sqrt(d2) / r]);
+        this._relax(idx, w, 0.7, remember);
+      } else if (this.mode === "puxar") {
+        const dLoc = local.clone().sub(this._lastLocal);
+        for (let k = 0; k < idx.length; k++) {
+          const i = idx[k], f = w[k];
+          remember(i);
+          pos.setXYZ(i, pos.getX(i) + dLoc.x * f, pos.getY(i) + dLoc.y * f, pos.getZ(i) + dLoc.z * f);
         }
-        const orig = /* @__PURE__ */ new Map();
-        for (const [i] of touched)
-          orig.set(i, [pos.getX(i), pos.getY(i), pos.getZ(i)]);
-        for (const [i, fall] of touched) {
-          const nb = adj[i];
-          if (!nb || !nb.length)
-            continue;
-          let sx = 0, sy = 0, sz = 0;
-          for (const j of nb) {
-            const o = orig.get(j) || [pos.getX(j), pos.getY(j), pos.getZ(j)];
+        this._relax(idx, w, 0.15, remember);
+      } else {
+        const sign2 = this.mode === "afundar" ? -1 : 1;
+        for (let k = 0; k < idx.length; k++) {
+          const i = idx[k], f = w[k] * step * sign2;
+          remember(i);
+          pos.setXYZ(i, pos.getX(i) + nx * f, pos.getY(i) + ny * f, pos.getZ(i) + nz * f);
+        }
+        this._relax(idx, w, 0.18, remember);
+      }
+      pos.needsUpdate = true;
+      g.computeVertexNormals();
+      this._after(hit, local);
+    }
+    _after(hit, local) {
+      this._lastLocal = local.clone();
+      this._lastWorld = hit.point.clone();
+    }
+    // relaxamento Laplaciano restrito aos vértices do pincel
+    _relax(idx, weights, amount, remember) {
+      const g = this._mesh.geometry;
+      const pos = g.attributes.position;
+      const adj = this._adjacency(g);
+      const orig = /* @__PURE__ */ new Map();
+      for (const i of idx)
+        orig.set(i, [pos.getX(i), pos.getY(i), pos.getZ(i)]);
+      for (let k = 0; k < idx.length; k++) {
+        const i = idx[k];
+        const nb = adj[i];
+        if (!nb || nb.length < 2)
+          continue;
+        let sx = 0, sy = 0, sz = 0;
+        for (const j of nb) {
+          const o = orig.get(j);
+          if (o) {
             sx += o[0];
             sy += o[1];
             sz += o[2];
+          } else {
+            sx += pos.getX(j);
+            sy += pos.getY(j);
+            sz += pos.getZ(j);
           }
-          const inv = 1 / nb.length;
-          remember(i);
-          const w = 0.6 * fall;
-          pos.setXYZ(
-            i,
-            pos.getX(i) + (sx * inv - pos.getX(i)) * w,
-            pos.getY(i) + (sy * inv - pos.getY(i)) * w,
-            pos.getZ(i) + (sz * inv - pos.getZ(i)) * w
-          );
         }
-      } else if (this.mode === "puxar") {
-        const deltaWorld = hit.point.clone().sub(this._lastWorld || hit.point);
-        const deltaLocal = local.clone().sub(this._lastLocal);
-        for (let i = 0; i < pos.count; i++) {
-          const dx = pos.getX(i) - this._lastLocal.x, dy = pos.getY(i) - this._lastLocal.y, dz = pos.getZ(i) - this._lastLocal.z;
-          const d2 = dx * dx + dy * dy + dz * dz;
-          if (d2 > r2)
-            continue;
-          const fall = smooth2(1 - Math.sqrt(d2) / r);
-          remember(i);
-          pos.setXYZ(i, pos.getX(i) + deltaLocal.x * fall, pos.getY(i) + deltaLocal.y * fall, pos.getZ(i) + deltaLocal.z * fall);
-        }
-      } else {
-        const sign2 = this.mode === "afundar" ? -1 : 1;
-        for (let i = 0; i < pos.count; i++) {
-          const dx = pos.getX(i) - local.x, dy = pos.getY(i) - local.y, dz = pos.getZ(i) - local.z;
-          const d2 = dx * dx + dy * dy + dz * dz;
-          if (d2 > r2)
-            continue;
-          const fall = smooth2(1 - Math.sqrt(d2) / r);
-          remember(i);
-          pos.setXYZ(
-            i,
-            pos.getX(i) + nrm.getX(i) * stepMM * fall * sign2,
-            pos.getY(i) + nrm.getY(i) * stepMM * fall * sign2,
-            pos.getZ(i) + nrm.getZ(i) * stepMM * fall * sign2
-          );
-        }
-      }
-      pos.needsUpdate = true;
-      this._lastLocal = local;
-      this._lastWorld = hit.point.clone();
-      this._dirtyNormals = true;
-      if (this.mode !== "puxar") {
-        g.computeVertexNormals();
-        this._dirtyNormals = false;
+        const inv = 1 / nb.length;
+        const a = amount * weights[k];
+        remember(i);
+        pos.setXYZ(
+          i,
+          pos.getX(i) + (sx * inv - pos.getX(i)) * a,
+          pos.getY(i) + (sy * inv - pos.getY(i)) * a,
+          pos.getZ(i) + (sz * inv - pos.getZ(i)) * a
+        );
       }
     }
     end() {
@@ -35622,8 +35795,8 @@
       if (!mesh || !rec || !rec.old.size)
         return;
       const g = mesh.geometry;
-      if (this._dirtyNormals)
-        g.computeVertexNormals();
+      g.computeVertexNormals();
+      g.computeBoundingSphere();
       const pos = g.attributes.position;
       const neu = /* @__PURE__ */ new Map();
       for (const i of rec.old.keys())
@@ -35634,7 +35807,7 @@
           pos.setXYZ(i, p[0], p[1], p[2]);
         pos.needsUpdate = true;
         g.computeVertexNormals();
-        mesh.geometry.computeBoundingSphere();
+        g.computeBoundingSphere();
         this.app.interact.refreshSelection();
       };
       mesh.userData.geomDirty = true;
@@ -35644,7 +35817,7 @@
     // ---------- preparo da malha ----------
     _makeSculptable(mesh) {
       const g = mesh.geometry;
-      let tris = (g.index ? g.index.count : g.attributes.position.count) / 3;
+      const tris = (g.index ? g.index.count : g.attributes.position.count) / 3;
       if (tris > 4e5) {
         this.app.ui.toast("Pe\xE7a densa demais para esculpir");
         return false;
@@ -35656,12 +35829,12 @@
       }
       let welded = weld(g);
       let guard = 0;
-      while (welded.indices.length / 3 < 6e3 && welded.indices.length / 3 * 4 < 12e4 && guard++ < 3) {
+      while (welded.indices.length / 3 < 24e3 && welded.indices.length / 3 * 4 < 2e5 && guard++ < 4) {
         welded = subdivide(welded.positions, welded.indices);
       }
       const ng = new BufferGeometry();
       ng.setAttribute("position", new BufferAttribute(new Float32Array(welded.positions), 3));
-      ng.setIndex(welded.indices.length > 65535 ? welded.indices : welded.indices);
+      ng.setIndex(welded.indices);
       ng.computeVertexNormals();
       mesh.geometry.dispose();
       mesh.geometry = ng;
@@ -36702,7 +36875,39 @@
 
   // web/src/codegen.js
   var CODE_EXAMPLES = {
-    "Engrenagem": `// Engrenagem param\xE9trica
+    "Jipe modular": `// Jipe modular montado por pe\xE7as transformadas.
+// Cada pe\xE7a \xE9 posicionada com .translate / .rotateDeg / .color.
+const azul = '#3f7fd6', preto = '#20262e', vidro = '#8fd8ff', prata = '#c7ced6';
+
+// chassi e carroceria
+add(K.box(80, 10, 44).translate(0, 14, 0).color(azul));
+add(K.box(80, 4, 44).translate(0, 8, 0).color(preto));           // para-choque baixo
+add(K.box(46, 16, 40).translate(-4, 26, 0).color(azul));          // cabine
+add(K.box(30, 14, 36).translate(30, 22, 0).color(azul));          // cap\xF4
+
+// vidros
+add(K.box(2, 12, 34).translate(13, 27, 0).color(vidro));          // para-brisa
+add(K.box(20, 10, 2).translate(-4, 27, 19).color(vidro));         // janela lateral
+add(K.box(20, 10, 2).translate(-4, 27, -19).color(vidro));
+
+// para-lamas / estribos
+add(K.box(84, 3, 6).translate(0, 12, 24).color(preto));
+add(K.box(84, 3, 6).translate(0, 12, -24).color(preto));
+
+// far\xF3is
+add(K.cylinder(3, 3).rotateDeg(0, 0, 90).translate(45, 20, 14).color('#fff59d'));
+add(K.cylinder(3, 3).rotateDeg(0, 0, 90).translate(45, 20, -14).color('#fff59d'));
+
+// 4 rodas (pneu + calota)
+function roda(x, z) {
+  add(K.cylinder(11, 8).rotateDeg(90, 0, 0).translate(x, 11, z).color(preto));
+  add(K.cylinder(5, 9).rotateDeg(90, 0, 0).translate(x, 11, z).color(prata));
+}
+roda(26, 26); roda(26, -26); roda(-30, 26); roda(-30, -26);
+
+// estepe atr\xE1s
+add(K.cylinder(10, 7).rotateDeg(90, 0, 0).translate(-44, 22, 0).color(preto));`,
+    "Engrenagem": `// Engrenagem param\xE9trica (perfil + furo central)
 const dentes = 16, raio = 22, altura = 8;
 const pts = [];
 const passos = dentes * 4;
@@ -36713,47 +36918,35 @@ for (let i = 0; i < passos; i++) {
 }
 const eng = K.extrude(pts, altura);
 const furo = K.cylinder(5, altura + 2);
-add(K.subtract(eng, furo), '#b0bec5');`,
-    "Vaso ondulado": `// Vaso com paredes onduladas (revolu\xE7\xE3o aproximada)
+add(K.subtract(eng, furo).color('#b0bec5'));`,
+    "Vaso ondulado": `// Vaso por revolu\xE7\xE3o (perfil ondulad\u043E)
 const alturas = 60, voltas = 220;
 const pts = [];
 for (let i = 0; i <= voltas; i++) {
   const t = i / voltas;
-  const y = t * alturas;
   const r = 18 + Math.sin(t * Math.PI * 6) * 4 + t * 6;
-  const g = new K.THREE.Vector2(r, y);
-  pts.push(g);
+  pts.push(new K.THREE.Vector2(r, t * alturas));
 }
-const geo = new K.THREE.LatheGeometry(pts, 64);
-add(geo, '#4db6ac');`,
+add(new K.THREE.LatheGeometry(pts, 64), '#4db6ac');`,
     "Torre de cubos": `// Pilha de cubos girando
 for (let i = 0; i < 8; i++) {
-  const c = K.box(20 - i, 6, 20 - i);
-  c.position.y = i * 6 + 3;
-  c.rotation.y = i * 0.35;
-  add(c, K.hue(i / 8));
+  add(K.box(20 - i, 6, 20 - i)
+    .translate(0, i * 6 + 3, 0)
+    .rotateDeg(0, i * 20, 0)
+    .color(K.hue(i / 8)));
 }`,
-    "Parafuso (h\xE9lice)": `// Rosca aproximada por segmentos
-const R = 8, passo = 3, voltas = 6, seg = 240;
-const corpo = K.cylinder(R * 0.7, passo * voltas);
-corpo.position.y = passo * voltas / 2;
-add(corpo, '#90a4ae');
-for (let i = 0; i < seg; i++) {
-  const t = i / seg;
-  const a = t * voltas * Math.PI * 2;
-  const b = K.box(3, 1.4, 1.4);
-  b.position.set(Math.cos(a) * R, t * passo * voltas, Math.sin(a) * R);
-  b.rotation.y = -a;
-  add(b, '#b0bec5');
-}`
+    "Diagn\xF3stico da API": `// Cole isto e execute: mostra os m\xE9todos dispon\xEDveis no console.
+const m = K.box(10, 10, 10);
+console.log('m\xE9todos da pe\xE7a:', Object.keys(m).filter(k => typeof m[k] === 'function'));
+console.log('helpers K:', Object.keys(K));
+add(m.translate(0, 5, 0).color('#4fc3f7'));`
   };
   var CodeGen = class {
     constructor(app3) {
       this.app = app3;
     }
-    // API disponível dentro do código do usuário
     _api() {
-      const mk = (geo) => new Mesh(geo);
+      const mk = (geo) => wrap(new Mesh(geo));
       return {
         THREE: three_module_exports,
         box: (w = 20, h = 20, d = 20) => mk(new BoxGeometry(w, h, d)),
@@ -36763,16 +36956,21 @@ for (let i = 0; i < seg; i++) {
         cone: (r = 10, h = 20, seg = 48) => mk(new ConeGeometry(r, h, seg)),
         torus: (R = 14, r = 4, seg = 48) => mk(new TorusGeometry(R, r, 20, seg)),
         extrude: (points, depth = 10) => {
-          const pts = points.map((p) => [p[0], -p[1]]);
-          const spec = { outers: [{ pts, holes: [] }], depth };
+          const spec = { outers: [{ pts: points.map((p) => [p[0], -p[1]]), holes: [] }], depth };
           const g = buildExtrudeGeometry(spec);
-          const m = mk(g.geometry);
-          m.position.copy(g.center);
-          return m;
+          return wrap(new Mesh(g.geometry)).translate(g.center.x, g.center.y, g.center.z);
         },
-        // operações booleanas entre malhas (para peças leves)
-        subtract: (a, b) => booleanMesh(a, b, "subtract"),
-        union: (a, b) => booleanMesh(a, b, "union"),
+        subtract: (a, b) => wrap(booleanMesh(a, b, "subtract")),
+        union: (a, b) => wrap(booleanMesh(a, b, "union")),
+        // transformações também na forma de função (K.translate(peça, x,y,z))
+        translate: (o, x, y, z) => o.translate(x, y, z),
+        rotate: (o, x, y, z) => o.rotateDeg(x, y, z),
+        group: (...meshes) => {
+          const g = new Group();
+          for (const m of meshes)
+            g.add(m);
+          return g;
+        },
         hue: (t) => new Color().setHSL((t % 1 + 1) % 1, 0.6, 0.6).getStyle(),
         deg: (d) => MathUtils.degToRad(d)
       };
@@ -36780,12 +36978,7 @@ for (let i = 0; i < seg; i++) {
     run(code) {
       const created = [];
       const K = this._api();
-      const add = (obj, color) => {
-        let mesh = obj;
-        if (obj && obj.isBufferGeometry)
-          mesh = new Mesh(obj);
-        if (!mesh || !mesh.isMesh)
-          throw new Error("add() precisa de uma malha ou geometria");
+      const bake = (mesh, color) => {
         mesh.updateMatrix();
         mesh.geometry.applyMatrix4(mesh.matrix);
         mesh.position.set(0, 0, 0);
@@ -36793,35 +36986,60 @@ for (let i = 0; i < seg; i++) {
         mesh.scale.set(1, 1, 1);
         if (!mesh.geometry.attributes.normal)
           mesh.geometry.computeVertexNormals();
-        mesh.userData._color = color;
+        if (color != null)
+          mesh.userData._color = color;
         created.push(mesh);
-        return mesh;
       };
-      const fn = new Function("K", "add", "THREE", "Math", `"use strict";
+      const add = (obj, color) => {
+        if (obj && obj.isBufferGeometry)
+          obj = new Mesh(obj);
+        if (obj && obj.isGroup) {
+          obj.updateMatrixWorld(true);
+          const meshes = [];
+          obj.traverse((o) => {
+            if (o.isMesh)
+              meshes.push(o);
+          });
+          for (const m of meshes) {
+            const world = m.matrixWorld.clone();
+            m.geometry = m.geometry.clone().applyMatrix4(world);
+            m.position.set(0, 0, 0);
+            m.rotation.set(0, 0, 0);
+            m.scale.set(1, 1, 1);
+            if (!m.geometry.attributes.normal)
+              m.geometry.computeVertexNormals();
+            if (color != null && m.userData._color == null)
+              m.userData._color = color;
+            created.push(m);
+          }
+          return obj;
+        }
+        if (!obj || !obj.isMesh)
+          throw new Error("add() precisa de uma pe\xE7a (malha) ou geometria");
+        bake(obj, color);
+        return obj;
+      };
+      const fn = new Function("K", "add", "THREE", "Math", "console", `"use strict";
 ${code}
 `);
-      const ret = fn(K, add, three_module_exports, Math);
+      const ret = fn(K, add, three_module_exports, Math, window.console);
       if (created.length === 0 && ret)
         add(ret);
       if (!created.length)
-        throw new Error("nenhum objeto criado \u2014 use add(...) ou retorne uma malha");
+        throw new Error("nenhum objeto criado \u2014 use add(...) ou retorne uma pe\xE7a");
       const objs = this.app.objects;
+      for (const m of created) {
+        m.material = objs.makeMaterial(m.userData._color || objs.nextColor());
+        m.castShadow = m.receiveShadow = true;
+        delete m.userData._color;
+      }
       const group = created.length === 1 ? created[0] : new Group();
       if (created.length > 1)
         for (const m of created)
           group.add(m);
-      for (const m of created) {
-        const col = m.userData._color || objs.nextColor();
-        m.material = objs.makeMaterial(col);
-        m.castShadow = m.receiveShadow = true;
-        delete m.userData._color;
-      }
       group.name = objs.makeName("csg");
       group.userData.kind = "codigo";
-      if (created.length > 1)
-        group.userData.geomDirty = true;
-      else
-        group.userData.geomDirty = true;
+      group.userData.geomDirty = true;
       objs.prepare(group);
       objs.dropToGround(group);
       const box = objs.bounds(group);
@@ -36833,6 +37051,44 @@ ${code}
       return group;
     }
   };
+  function wrap(mesh) {
+    mesh.translate = function(x = 0, y = 0, z = 0) {
+      this.position.x += x;
+      this.position.y += y;
+      this.position.z += z;
+      return this;
+    };
+    mesh.moveTo = function(x = 0, y = 0, z = 0) {
+      this.position.set(x, y, z);
+      return this;
+    };
+    mesh.rotate = function(x = 0, y = 0, z = 0) {
+      this.rotation.x += x;
+      this.rotation.y += y;
+      this.rotation.z += z;
+      return this;
+    };
+    mesh.rotateDeg = function(x = 0, y = 0, z = 0) {
+      const d = Math.PI / 180;
+      this.rotation.x += x * d;
+      this.rotation.y += y * d;
+      this.rotation.z += z * d;
+      return this;
+    };
+    mesh.scaleBy = function(sx = 1, sy, sz) {
+      if (sy === void 0) {
+        sy = sx;
+        sz = sx;
+      }
+      this.scale.set(this.scale.x * sx, this.scale.y * sy, this.scale.z * sz);
+      return this;
+    };
+    mesh.color = function(c) {
+      this.userData._color = c;
+      return this;
+    };
+    return mesh;
+  }
   function booleanMesh(a, b, op) {
     a.updateMatrix();
     b.updateMatrix();
@@ -44130,7 +44386,27 @@ ${code}
 
   // web/src/io.js
   var app = null;
-  var PRIM_KINDS = /* @__PURE__ */ new Set(["box", "sphere", "cylinder", "cone", "torus", "plate", "wedge"]);
+  var PRIM_KINDS = /* @__PURE__ */ new Set([
+    "box",
+    "sphere",
+    "cylinder",
+    "cone",
+    "torus",
+    "plate",
+    "wedge",
+    "tube",
+    "pyramid",
+    "hexprism",
+    "triprism",
+    "star",
+    "heart",
+    "dome",
+    "capsule",
+    "disc",
+    "washer",
+    "gear",
+    "lbracket"
+  ]);
   var AUTOSAVE_KEY = "estudio3d.autosave.v1";
   function init(a) {
     app = a;
@@ -44205,16 +44481,16 @@ ${code}
     if (ext === "3mf") {
       const inner = new ThreeMFLoader().parse(buf);
       convertMaterials(inner);
-      const wrap = new Group();
-      wrap.rotation.x = -Math.PI / 2;
-      wrap.add(inner);
-      return wrap;
+      const wrap2 = new Group();
+      wrap2.rotation.x = -Math.PI / 2;
+      wrap2.add(inner);
+      return wrap2;
     }
     if (ext === "glb" || ext === "gltf") {
       const gltf = await new Promise((resolve, reject) => new GLTFLoader().parse(buf, "", resolve, reject));
-      const wrap = new Group();
-      wrap.add(gltf.scene);
-      return wrap;
+      const wrap2 = new Group();
+      wrap2.add(gltf.scene);
+      return wrap2;
     }
     return null;
   }
@@ -44274,11 +44550,11 @@ ${code}
     }
   }
   function wrapZUp(root) {
-    const wrap = new Group();
-    wrap.rotation.x = Math.PI / 2;
-    wrap.add(root);
-    wrap.updateMatrixWorld(true);
-    return wrap;
+    const wrap2 = new Group();
+    wrap2.rotation.x = Math.PI / 2;
+    wrap2.add(root);
+    wrap2.updateMatrixWorld(true);
+    return wrap2;
   }
   function export3MF(root) {
     const meshes = [];
@@ -45125,8 +45401,8 @@ ${code}
       };
     }
     refreshRecents() {
-      const wrap = $("recentColors");
-      wrap.innerHTML = "";
+      const wrap2 = $("recentColors");
+      wrap2.innerHTML = "";
       for (const hex of this.picker.recents.slice(0, 8)) {
         const b = document.createElement("button");
         b.className = "rc";
@@ -45148,7 +45424,7 @@ ${code}
           this.refresh();
           this.refreshList();
         };
-        wrap.appendChild(b);
+        wrap2.appendChild(b);
       }
     }
     _bindKeyboard() {
@@ -45732,22 +46008,35 @@ ${code}
           this.app.ops.arrayCircular(sel, count, Number($("arrRad").value));
       };
     }
-    // ---------- furo rápido ----------
+    // ---------- furo regulável ----------
     _holeFlow() {
       const sel = this.app.interact.selected;
       if (!sel) {
         this.toast("Selecione a pe\xE7a onde fazer o furo");
         return;
       }
-      const diameter = 6;
-      this.toast("Toque no ponto do furo (\xD8 6 mm)", "Cancelar", () => this.app.interact.cancelPick(), 8e3);
-      this.app.interact.startPointPick((pt) => {
-        if (!pt) {
-          this.toast("Furo cancelado");
-          return;
-        }
-        this.app.ops.drillHole(sel, pt.x, pt.z, diameter);
-      });
+      this.openModal(`
+      <h2>Furo</h2>
+      <p>Escolha o di\xE2metro e depois toque no ponto da pe\xE7a onde o furo deve passar.</p>
+      <div class="sliderrow"><label>Di\xE2metro</label><input type="range" id="holeD" min="1" max="60" step="0.5" value="6"><span id="holeDVal">6 mm</span></div>
+      <div class="mrow">
+        <button class="mbtn" id="holeCancel">Cancelar</button>
+        <button class="mbtn primary" id="holeGo">Escolher ponto</button>
+      </div>`);
+      $("holeD").oninput = () => $("holeDVal").textContent = $("holeD").value + " mm";
+      $("holeCancel").onclick = () => this.closeModal();
+      $("holeGo").onclick = () => {
+        const diameter = Number($("holeD").value);
+        this.closeModal();
+        this.toast(`Toque no ponto do furo (\xD8 ${diameter} mm)`, "Cancelar", () => this.app.interact.cancelPick(), 8e3);
+        this.app.interact.startPointPick((pt) => {
+          if (!pt) {
+            this.toast("Furo cancelado");
+            return;
+          }
+          this.app.ops.drillHole(sel, pt.x, pt.z, diameter);
+        });
+      };
     }
     // ---------- codificação ----------
     _codeDialog() {
@@ -45964,8 +46253,8 @@ ${code}
       ctx.stroke();
     }
     _renderRecents() {
-      const wrap = $("pickerRecents");
-      wrap.innerHTML = "";
+      const wrap2 = $("pickerRecents");
+      wrap2.innerHTML = "";
       for (const hex of this.recents) {
         const b = document.createElement("button");
         b.className = "rc";
@@ -45974,7 +46263,7 @@ ${code}
           this.setHex(hex);
           this._update();
         };
-        wrap.appendChild(b);
+        wrap2.appendChild(b);
       }
     }
     addRecent(hex) {
