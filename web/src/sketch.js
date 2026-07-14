@@ -249,9 +249,20 @@ export class Sketch {
 
   // ---------- conclusão ----------
   finish() {
-    // inclui a polilinha de pontos, se houver
+    // inclui a polilinha de pontos, suavizada como um traço livre
     const allStrokes = [...this.strokes];
-    if (this._nodes.length >= 3) allStrokes.push(this._nodes.map(n => n.clone()));
+    if (this._nodes.length >= 3) {
+      let pts = catmullRomClosed(this._nodes, 14); // curva suave passando pelos nós
+      pts = simplify(pts, 0.5);
+      if (this.magic) {
+        const rec = recognizeShape(pts);
+        if (rec) {
+          pts = rec.pts.map(p => new THREE.Vector2(p.x, p.y));
+          this.app.ui.toast(`✨ Corrigido: ${rec.label}`);
+        }
+      }
+      allStrokes.push(pts);
+    }
     if (!allStrokes.length) { this.exit(true); return; }
     const polys = allStrokes.map(pts => pts.map(p => ({ x: p.x, y: -p.y }))); // chão -> forma
     const spec = buildSpecFromPolys(polys, this.defaultDepth);
@@ -471,3 +482,24 @@ function segDist(p, a, b) {
 }
 
 function round3(v) { return Math.round(v * 1000) / 1000; }
+
+// curva fechada suave (Catmull-Rom centrípeta) passando por todos os nós
+function catmullRomClosed(nodes, perSeg) {
+  const n = nodes.length;
+  if (n < 3) return nodes.map(p => p.clone());
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const p0 = nodes[(i - 1 + n) % n], p1 = nodes[i], p2 = nodes[(i + 1) % n], p3 = nodes[(i + 2) % n];
+    for (let s = 0; s < perSeg; s++) {
+      const t = s / perSeg, t2 = t * t, t3 = t2 * t;
+      const x = 0.5 * ((2 * p1.x) + (-p0.x + p2.x) * t +
+        (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 +
+        (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3);
+      const y = 0.5 * ((2 * p1.y) + (-p0.y + p2.y) * t +
+        (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 +
+        (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3);
+      out.push(new THREE.Vector2(x, y));
+    }
+  }
+  return out;
+}

@@ -11,7 +11,9 @@ import { buildExtrudeGeometry } from './sketch.js';
 import { b64ToGray, buildReliefGeometry } from './shapegen.js';
 
 let app = null;
-const PRIM_KINDS = new Set(['box', 'sphere', 'cylinder', 'cone', 'torus', 'plate', 'wedge']);
+const PRIM_KINDS = new Set(['box', 'sphere', 'cylinder', 'cone', 'torus', 'plate', 'wedge',
+  'tube', 'pyramid', 'hexprism', 'triprism', 'star', 'heart', 'dome', 'capsule',
+  'disc', 'washer', 'gear', 'lbracket']);
 const AUTOSAVE_KEY = 'estudio3d.autosave.v1';
 
 export function init(a) {

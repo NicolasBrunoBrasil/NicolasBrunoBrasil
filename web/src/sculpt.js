@@ -1,20 +1,19 @@
 import * as THREE from 'three';
 
-// Escultura: deforma a malha empurrando os vértices no raio de um pincel.
-//  - inflar : puxa a superfície para fora (ao longo da normal)
-//  - afundar: empurra para dentro
-//  - suavizar: relaxa (Laplaciano) para alisar
-//  - puxar  : arrasta os vértices na direção do movimento (modo "seta")
-// Malhas muito grosseiras são subdivididas ao iniciar, para ter resolução.
+// Escultura suave: o pincel desliza sobre a superfície e a acompanha.
+// A chave para não criar "espinhos" é deslocar todos os vértices do pincel
+// na MESMA direção (a normal média do pincel), com um falloff suave, e
+// aplicar um leve relaxamento a cada passada. Nunca usamos a normal de cada
+// vértice isoladamente (é isso que gerava pontas desordenadas).
 export class Sculpt {
   constructor(app) {
     this.app = app;
     this.active = false;
     this.mode = 'inflar';
-    this.radius = 10;   // mm
-    this.strength = 1.2; // mm por passada
+    this.radius = 12;    // mm
+    this.strength = 1.0; // mm por passada (suave)
 
-    const geo = new THREE.RingGeometry(0.9, 1, 48);
+    const geo = new THREE.RingGeometry(0.92, 1, 56);
     geo.rotateX(-Math.PI / 2);
     this.cursor = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
       color: 0x8de0ff, transparent: true, opacity: 0.9, depthTest: false, side: THREE.DoubleSide,
@@ -25,6 +24,8 @@ export class Sculpt {
 
     this._stroke = null;
     this._mesh = null;
+    this._adj = null;
+    this._adjGeo = null;
   }
 
   setActive(on, mode) {
@@ -56,6 +57,7 @@ export class Sculpt {
     this._stroke = { old: new Map() };
     this._adj = null;
     this._lastLocal = mesh.worldToLocal(hit.point.clone());
+    this._lastWorld = hit.point.clone();
     this.stroke(hit);
     return true;
   }
@@ -71,69 +73,82 @@ export class Sculpt {
     const avgScale = Math.max((scl.x + scl.y + scl.z) / 3, 1e-6);
     const r = this.radius / avgScale;
     const r2 = r * r;
-    const stepMM = this.strength / avgScale;
+    const step = Math.min(this.strength, this.radius * 0.5) / avgScale;
     const rec = this._stroke;
+    const remember = (i) => { if (!rec.old.has(i)) rec.old.set(i, [pos.getX(i), pos.getY(i), pos.getZ(i)]); };
 
-    const remember = (i) => {
-      if (!rec.old.has(i)) rec.old.set(i, [pos.getX(i), pos.getY(i), pos.getZ(i)]);
-    };
+    // 1) vértices afetados + pesos (falloff suave, cai a zero na borda)
+    const idx = [], w = [];
+    let nx = 0, ny = 0, nz = 0; // normal média do pincel (direção coerente)
+    for (let i = 0; i < pos.count; i++) {
+      const dx = pos.getX(i) - local.x, dy = pos.getY(i) - local.y, dz = pos.getZ(i) - local.z;
+      const d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 > r2) continue;
+      const fall = smooth(1 - Math.sqrt(d2) / r);
+      idx.push(i); w.push(fall);
+      nx += nrm.getX(i) * fall; ny += nrm.getY(i) * fall; nz += nrm.getZ(i) * fall;
+    }
+    if (!idx.length) { this._after(hit, local); return; }
+    const nlen = Math.hypot(nx, ny, nz) || 1;
+    nx /= nlen; ny /= nlen; nz /= nlen;
 
+    // 2) aplica o modo
     if (this.mode === 'suavizar') {
-      const adj = this._adjacency(g);
-      const touched = [];
-      for (let i = 0; i < pos.count; i++) {
-        const dx = pos.getX(i) - local.x, dy = pos.getY(i) - local.y, dz = pos.getZ(i) - local.z;
-        const d2 = dx * dx + dy * dy + dz * dz;
-        if (d2 > r2) continue;
-        touched.push([i, 1 - Math.sqrt(d2) / r]);
-      }
-      const orig = new Map();
-      for (const [i] of touched) orig.set(i, [pos.getX(i), pos.getY(i), pos.getZ(i)]);
-      for (const [i, fall] of touched) {
-        const nb = adj[i];
-        if (!nb || !nb.length) continue;
-        let sx = 0, sy = 0, sz = 0;
-        for (const j of nb) { const o = orig.get(j) || [pos.getX(j), pos.getY(j), pos.getZ(j)]; sx += o[0]; sy += o[1]; sz += o[2]; }
-        const inv = 1 / nb.length;
-        remember(i);
-        const w = 0.6 * fall;
-        pos.setXYZ(i,
-          pos.getX(i) + (sx * inv - pos.getX(i)) * w,
-          pos.getY(i) + (sy * inv - pos.getY(i)) * w,
-          pos.getZ(i) + (sz * inv - pos.getZ(i)) * w);
-      }
+      this._relax(idx, w, 0.7, remember);
     } else if (this.mode === 'puxar') {
-      // desloca no plano da câmera, na direção do movimento do ponteiro
-      const deltaWorld = hit.point.clone().sub(this._lastWorld || hit.point);
-      const deltaLocal = local.clone().sub(this._lastLocal);
-      for (let i = 0; i < pos.count; i++) {
-        const dx = pos.getX(i) - this._lastLocal.x, dy = pos.getY(i) - this._lastLocal.y, dz = pos.getZ(i) - this._lastLocal.z;
-        const d2 = dx * dx + dy * dy + dz * dz;
-        if (d2 > r2) continue;
-        const fall = smooth(1 - Math.sqrt(d2) / r);
+      const dLoc = local.clone().sub(this._lastLocal);
+      for (let k = 0; k < idx.length; k++) {
+        const i = idx[k], f = w[k];
         remember(i);
-        pos.setXYZ(i, pos.getX(i) + deltaLocal.x * fall, pos.getY(i) + deltaLocal.y * fall, pos.getZ(i) + deltaLocal.z * fall);
+        pos.setXYZ(i, pos.getX(i) + dLoc.x * f, pos.getY(i) + dLoc.y * f, pos.getZ(i) + dLoc.z * f);
       }
+      this._relax(idx, w, 0.15, remember);
     } else {
       const sign = this.mode === 'afundar' ? -1 : 1;
-      for (let i = 0; i < pos.count; i++) {
-        const dx = pos.getX(i) - local.x, dy = pos.getY(i) - local.y, dz = pos.getZ(i) - local.z;
-        const d2 = dx * dx + dy * dy + dz * dz;
-        if (d2 > r2) continue;
-        const fall = smooth(1 - Math.sqrt(d2) / r);
+      for (let k = 0; k < idx.length; k++) {
+        const i = idx[k], f = w[k] * step * sign;
         remember(i);
-        pos.setXYZ(i,
-          pos.getX(i) + nrm.getX(i) * stepMM * fall * sign,
-          pos.getY(i) + nrm.getY(i) * stepMM * fall * sign,
-          pos.getZ(i) + nrm.getZ(i) * stepMM * fall * sign);
+        pos.setXYZ(i, pos.getX(i) + nx * f, pos.getY(i) + ny * f, pos.getZ(i) + nz * f);
       }
+      // relaxamento leve mantém a superfície fluida e sem pontas
+      this._relax(idx, w, 0.18, remember);
     }
+
     pos.needsUpdate = true;
-    this._lastLocal = local;
+    g.computeVertexNormals(); // normais sempre atualizadas -> pincel segue o contorno
+    this._after(hit, local);
+  }
+
+  _after(hit, local) {
+    this._lastLocal = local.clone();
     this._lastWorld = hit.point.clone();
-    this._dirtyNormals = true;
-    // recomputa normais esparsamente para o pincel continuar seguindo a superfície
-    if (this.mode !== 'puxar') { g.computeVertexNormals(); this._dirtyNormals = false; }
+  }
+
+  // relaxamento Laplaciano restrito aos vértices do pincel
+  _relax(idx, weights, amount, remember) {
+    const g = this._mesh.geometry;
+    const pos = g.attributes.position;
+    const adj = this._adjacency(g);
+    const orig = new Map();
+    for (const i of idx) orig.set(i, [pos.getX(i), pos.getY(i), pos.getZ(i)]);
+    for (let k = 0; k < idx.length; k++) {
+      const i = idx[k];
+      const nb = adj[i];
+      if (!nb || nb.length < 2) continue;
+      let sx = 0, sy = 0, sz = 0;
+      for (const j of nb) {
+        const o = orig.get(j);
+        if (o) { sx += o[0]; sy += o[1]; sz += o[2]; }
+        else { sx += pos.getX(j); sy += pos.getY(j); sz += pos.getZ(j); }
+      }
+      const inv = 1 / nb.length;
+      const a = amount * weights[k];
+      remember(i);
+      pos.setXYZ(i,
+        pos.getX(i) + (sx * inv - pos.getX(i)) * a,
+        pos.getY(i) + (sy * inv - pos.getY(i)) * a,
+        pos.getZ(i) + (sz * inv - pos.getZ(i)) * a);
+    }
   }
 
   end() {
@@ -143,8 +158,8 @@ export class Sculpt {
     this._stroke = null;
     if (!mesh || !rec || !rec.old.size) return;
     const g = mesh.geometry;
-    if (this._dirtyNormals) g.computeVertexNormals();
-
+    g.computeVertexNormals();
+    g.computeBoundingSphere();
     const pos = g.attributes.position;
     const neu = new Map();
     for (const i of rec.old.keys()) neu.set(i, [pos.getX(i), pos.getY(i), pos.getZ(i)]);
@@ -153,7 +168,7 @@ export class Sculpt {
       for (const [i, p] of src) pos.setXYZ(i, p[0], p[1], p[2]);
       pos.needsUpdate = true;
       g.computeVertexNormals();
-      mesh.geometry.computeBoundingSphere();
+      g.computeBoundingSphere();
       this.app.interact.refreshSelection();
     };
     mesh.userData.geomDirty = true;
@@ -164,24 +179,21 @@ export class Sculpt {
   // ---------- preparo da malha ----------
   _makeSculptable(mesh) {
     const g = mesh.geometry;
-    let tris = (g.index ? g.index.count : g.attributes.position.count) / 3;
+    const tris = (g.index ? g.index.count : g.attributes.position.count) / 3;
     if (tris > 400000) { this.app.ui.toast('Peça densa demais para esculpir'); return false; }
     if (mesh.userData.sculptReady) {
-      // garante posições não compartilhadas de forma incorreta: já soldada
       if (!g.index) g.setIndex(makeSeqIndex(g.attributes.position.count));
       return true;
     }
-    // solda vértices (indexa) para não abrir fendas ao mover
     let welded = weld(g);
-    // subdivide malhas grosseiras para ganhar resolução de escultura
+    // subdivide malhas grosseiras para uma superfície bem lisa de esculpir
     let guard = 0;
-    while ((welded.indices.length / 3) < 6000 && (welded.indices.length / 3) * 4 < 120000 && guard++ < 3) {
+    while ((welded.indices.length / 3) < 24000 && (welded.indices.length / 3) * 4 < 200000 && guard++ < 4) {
       welded = subdivide(welded.positions, welded.indices);
     }
     const ng = new THREE.BufferGeometry();
     ng.setAttribute('position', new THREE.BufferAttribute(new Float32Array(welded.positions), 3));
-    ng.setIndex(welded.indices.length > 65535 ? welded.indices : welded.indices);
-    // preserva cores de vértice não é trivial após re-topologia: descarta a tinta
+    ng.setIndex(welded.indices);
     ng.computeVertexNormals();
     mesh.geometry.dispose();
     mesh.geometry = ng;

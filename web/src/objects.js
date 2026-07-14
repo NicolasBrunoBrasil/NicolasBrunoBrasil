@@ -32,6 +32,9 @@ export function applyFinish(material, finish) {
 const PRIM_NAMES = {
   box: 'Cubo', sphere: 'Esfera', cylinder: 'Cilindro', cone: 'Cone',
   torus: 'Anel', plate: 'Placa', wedge: 'Rampa',
+  tube: 'Tubo', pyramid: 'Pirâmide', hexprism: 'Prisma 6', triprism: 'Prisma 3',
+  star: 'Estrela', heart: 'Coração', dome: 'Cúpula', capsule: 'Cápsula',
+  disc: 'Disco', washer: 'Arruela', gear: 'Engrenagem', lbracket: 'Cantoneira',
   extrude: 'Esboço', import: 'Modelo', text: 'Texto', image: 'Imagem',
   relief: 'Relevo', csg: 'Peça',
 };
@@ -117,6 +120,22 @@ export class Objects {
         g.center();
         return g;
       }
+      case 'pyramid': {
+        const g = new THREE.ConeGeometry(15, 22, 4);
+        g.rotateY(Math.PI / 4);
+        return g;
+      }
+      case 'hexprism': return new THREE.CylinderGeometry(13, 13, 20, 6);
+      case 'triprism': return new THREE.CylinderGeometry(13, 13, 20, 3);
+      case 'capsule': return new THREE.CapsuleGeometry(8, 16, 8, 24);
+      case 'disc': return new THREE.CylinderGeometry(16, 16, 4, 56);
+      case 'dome': return new THREE.SphereGeometry(14, 48, 24, 0, Math.PI * 2, 0, Math.PI / 2);
+      case 'tube': return extrudeUp(ringShape(12, 7), 20);
+      case 'washer': return extrudeUp(ringShape(15, 7), 4);
+      case 'star': return extrudeUp(starShape(5, 16, 7), 8);
+      case 'heart': return extrudeUp(heartShape(1.0), 8);
+      case 'gear': return extrudeUp(gearShape(16, 15, 12, 5), 8);
+      case 'lbracket': return extrudeUp(lShape(28, 28, 9), 16);
       default: return null;
     }
   }
@@ -347,4 +366,79 @@ export class Objects {
       }
     });
   }
+}
+
+// ---------- geradores de forma (extrusão em pé, base no chão) ----------
+function extrudeUp(shape, depth) {
+  const g = new THREE.ExtrudeGeometry(shape, { depth, bevelEnabled: false, curveSegments: 24 });
+  g.rotateX(-Math.PI / 2); // forma XY -> chão XZ, extrusão para +Y
+  g.computeBoundingBox();
+  const bb = g.boundingBox;
+  g.translate(-(bb.min.x + bb.max.x) / 2, -bb.min.y, -(bb.min.z + bb.max.z) / 2);
+  g.computeVertexNormals();
+  return g;
+}
+
+function ringShape(outer, inner) {
+  const shape = new THREE.Shape();
+  shape.absarc(0, 0, outer, 0, Math.PI * 2, false);
+  const hole = new THREE.Path();
+  hole.absarc(0, 0, inner, 0, Math.PI * 2, true);
+  shape.holes.push(hole);
+  return shape;
+}
+
+function starShape(spikes, outer, inner) {
+  const shape = new THREE.Shape();
+  const n = spikes * 2;
+  for (let i = 0; i < n; i++) {
+    const r = i % 2 === 0 ? outer : inner;
+    const a = (i / n) * Math.PI * 2 - Math.PI / 2;
+    const x = Math.cos(a) * r, y = Math.sin(a) * r;
+    if (i === 0) shape.moveTo(x, y); else shape.lineTo(x, y);
+  }
+  shape.closePath();
+  return shape;
+}
+
+function heartShape(scale) {
+  const shape = new THREE.Shape();
+  const n = 90;
+  for (let i = 0; i <= n; i++) {
+    const t = (i / n) * Math.PI * 2;
+    const x = 16 * Math.pow(Math.sin(t), 3);
+    const y = 13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t);
+    const px = x * scale, py = y * scale;
+    if (i === 0) shape.moveTo(px, py); else shape.lineTo(px, py);
+  }
+  shape.closePath();
+  return shape;
+}
+
+function gearShape(teeth, outer, root, holeR) {
+  const shape = new THREE.Shape();
+  const steps = teeth * 4;
+  for (let i = 0; i < steps; i++) {
+    const a = (i / steps) * Math.PI * 2;
+    const r = (Math.floor(i / 2) % 2 === 0) ? outer : root;
+    const x = Math.cos(a) * r, y = Math.sin(a) * r;
+    if (i === 0) shape.moveTo(x, y); else shape.lineTo(x, y);
+  }
+  shape.closePath();
+  const hole = new THREE.Path();
+  hole.absarc(0, 0, holeR, 0, Math.PI * 2, true);
+  shape.holes.push(hole);
+  return shape;
+}
+
+function lShape(w, h, t) {
+  const shape = new THREE.Shape();
+  shape.moveTo(0, 0);
+  shape.lineTo(w, 0);
+  shape.lineTo(w, t);
+  shape.lineTo(t, t);
+  shape.lineTo(t, h);
+  shape.lineTo(0, h);
+  shape.closePath();
+  return shape;
 }

@@ -50,7 +50,7 @@ export class Paint {
     this.cursor.scale.setScalar(this.radius);
   }
 
-  strokeBegin() { this._stroke = new Map(); } // mesh -> { old: Map(i->[r,g,b]) }
+  strokeBegin() { this._stroke = new Map(); this._lastCenter = null; this._lastMesh = null; } // mesh -> { old: Map(i->[r,g,b]) }
 
   strokeEnd() {
     const stroke = this._stroke;
@@ -83,19 +83,31 @@ export class Paint {
     if (tris > 1200000) { this.app.ui.toast('Peça densa demais para pintar'); return; }
 
     this._ensureVertexColors(mesh);
+    const scl = new THREE.Vector3().setFromMatrixScale(mesh.matrixWorld);
+    const r = this.radius / Math.max(scl.x, scl.y, scl.z, 1e-6);
+    const local = mesh.worldToLocal(hit.point.clone());
+
+    // continuidade: preenche o caminho desde o último ponto (traço fluido)
+    const centers = [local];
+    if (this._lastMesh === mesh && this._lastCenter && tris < 250000) {
+      const gap = local.distanceTo(this._lastCenter);
+      const stepLen = r * 0.4;
+      const n = Math.min(8, Math.floor(gap / stepLen));
+      for (let s = 1; s <= n; s++) {
+        centers.unshift(this._lastCenter.clone().lerp(local, s / (n + 1)));
+      }
+    }
+    for (const c of centers) this._dab(mesh, c, r);
+    this._lastCenter = local.clone();
+    this._lastMesh = mesh;
+  }
+
+  // uma "estampa" do pincel: mistura a cor por vértice com falloff suave
+  _dab(mesh, center, r) {
     const g = mesh.geometry;
     const pos = g.attributes.position;
     const col = g.attributes.color;
-    const index = g.index;
-    const count = index ? index.count : pos.count;
-    const get = (k) => index ? index.getX(k) : k;
-
-    const local = mesh.worldToLocal(hit.point.clone());
-    const scl = new THREE.Vector3().setFromMatrixScale(mesh.matrixWorld);
-    const r = this.radius / Math.max(scl.x, scl.y, scl.z, 1e-6);
     const r2 = r * r;
-
-    // cor de aplicação: pintura usa a cor atual; borracha usa a cor base
     const base = mesh.userData.paintBase || [1, 1, 1];
     const cr = this.mode === 'erase' ? base[0] : this.color.r;
     const cg = this.mode === 'erase' ? base[1] : this.color.g;
@@ -104,21 +116,19 @@ export class Paint {
     let rec = this._stroke ? this._stroke.get(mesh) : null;
     if (this._stroke && !rec) this._stroke.set(mesh, rec = { old: new Map() });
 
-    const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
     let changed = false;
-    for (let i = 0; i < count; i += 3) {
-      const i0 = get(i), i1 = get(i + 1), i2 = get(i + 2);
-      a.fromBufferAttribute(pos, i0);
-      b.fromBufferAttribute(pos, i1);
-      c.fromBufferAttribute(pos, i2);
-      const mx = (a.x + b.x + c.x) / 3 - local.x;
-      const my = (a.y + b.y + c.y) / 3 - local.y;
-      const mz = (a.z + b.z + c.z) / 3 - local.z;
-      if (mx * mx + my * my + mz * mz > r2) continue;
-      for (const vi of [i0, i1, i2]) {
-        if (rec && !rec.old.has(vi)) rec.old.set(vi, [col.getX(vi), col.getY(vi), col.getZ(vi)]);
-        col.setXYZ(vi, cr, cg, cb);
-      }
+    for (let i = 0; i < pos.count; i++) {
+      const dx = pos.getX(i) - center.x, dy = pos.getY(i) - center.y, dz = pos.getZ(i) - center.z;
+      const d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 > r2) continue;
+      // núcleo cheio, borda suave: peso alto no centro e desce nas bordas
+      const t = 1 - Math.sqrt(d2) / r;
+      const w = Math.min(1, t * t * (3 - 2 * t) * 1.8);
+      if (rec && !rec.old.has(i)) rec.old.set(i, [col.getX(i), col.getY(i), col.getZ(i)]);
+      col.setXYZ(i,
+        col.getX(i) + (cr - col.getX(i)) * w,
+        col.getY(i) + (cg - col.getY(i)) * w,
+        col.getZ(i) + (cb - col.getZ(i)) * w);
       changed = true;
     }
     if (changed) col.needsUpdate = true;

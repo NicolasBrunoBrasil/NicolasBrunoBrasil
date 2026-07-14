@@ -261,9 +261,13 @@ input[type="range"] { flex: 1; accent-color: var(--accent); height: 26px; }
 #sculptbar input[type="range"] { width: 100px; }
 #paintbar input[type="range"] { width: 120px; }
 
-#primShelf { display: flex; flex-direction: column; gap: 8px; }
-.prim-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; }
+#primShelf { display: flex; flex-direction: column; gap: 8px; max-height: calc(100dvh - 100px); overflow-y: auto; scrollbar-width: thin; }
+#primShelf::-webkit-scrollbar { width: 7px; }
+#primShelf::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
+.prim-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.prim-grid .prim { width: auto; min-width: 74px; padding: 10px 4px; font-size: 11.5px; }
 #cadShelf.cad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+#cadShelf .prim { width: auto; min-width: 74px; }
 
 .check {
   display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--txt);

@@ -1044,16 +1044,29 @@ export class UI {
     };
   }
 
-  // ---------- furo rápido ----------
+  // ---------- furo regulável ----------
   _holeFlow() {
     const sel = this.app.interact.selected;
     if (!sel) { this.toast('Selecione a peça onde fazer o furo'); return; }
-    const diameter = 6;
-    this.toast('Toque no ponto do furo (Ø 6 mm)', 'Cancelar', () => this.app.interact.cancelPick(), 8000);
-    this.app.interact.startPointPick((pt) => {
-      if (!pt) { this.toast('Furo cancelado'); return; }
-      this.app.ops.drillHole(sel, pt.x, pt.z, diameter);
-    });
+    this.openModal(`
+      <h2>Furo</h2>
+      <p>Escolha o diâmetro e depois toque no ponto da peça onde o furo deve passar.</p>
+      <div class="sliderrow"><label>Diâmetro</label><input type="range" id="holeD" min="1" max="60" step="0.5" value="6"><span id="holeDVal">6 mm</span></div>
+      <div class="mrow">
+        <button class="mbtn" id="holeCancel">Cancelar</button>
+        <button class="mbtn primary" id="holeGo">Escolher ponto</button>
+      </div>`);
+    $('holeD').oninput = () => $('holeDVal').textContent = $('holeD').value + ' mm';
+    $('holeCancel').onclick = () => this.closeModal();
+    $('holeGo').onclick = () => {
+      const diameter = Number($('holeD').value);
+      this.closeModal();
+      this.toast(`Toque no ponto do furo (Ø ${diameter} mm)`, 'Cancelar', () => this.app.interact.cancelPick(), 8000);
+      this.app.interact.startPointPick((pt) => {
+        if (!pt) { this.toast('Furo cancelado'); return; }
+        this.app.ops.drillHole(sel, pt.x, pt.z, diameter);
+      });
+    };
   }
 
   // ---------- codificação ----------
