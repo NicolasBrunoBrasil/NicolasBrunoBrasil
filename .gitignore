@@ -4,3 +4,5 @@ package.json
 package-lock.json
 *.log
 apk/*.zip
+
+cad/__pycache__/
